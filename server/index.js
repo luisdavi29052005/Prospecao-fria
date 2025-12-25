@@ -8,6 +8,15 @@ const { createClient } = require('@supabase/supabase-js');
 const { PhoneNumberUtil, PhoneNumberFormat } = require('google-libphonenumber');
 require('dotenv').config();
 
+const normalizeJid = (jid) => {
+    if (!jid) return jid;
+    // 1. Remove device identifiers (551899...:46@s.whatsapp.net -> 551899...@s.whatsapp.net)
+    let clean = jid.replace(/:\d+@/, '@');
+    // 2. Normalize domains (@c.us -> @s.whatsapp.net)
+    clean = clean.replace('@c.us', '@s.whatsapp.net');
+    return clean.toLowerCase().trim();
+};
+
 const phoneUtil = PhoneNumberUtil.getInstance();
 
 // In-memory cache for LID -> JID mapping (e.g., 247...@lid -> 551...@s.whatsapp.net)
@@ -77,22 +86,38 @@ app.post('/api/webhook/waha', async (req, res) => {
         } else if (event === 'session.status') {
             console.log(`📱 Session status: ${payload?.status}`);
             io.emit('session.status', { session: sessionName, status: payload?.status });
-        } else if (event === 'presence.update') {
-            // Fix: WAHA sends { id, presences: [{ participant, lastKnownPresence }] }
-            const status = payload.presence || payload.presences?.[0]?.lastKnownPresence;
+        } else if (event === 'presence.update' || (event === 'engine.event' && (payload?.event === 'events.Presence' || payload?.event === 'events.ChatPresence'))) {
+            // Support both standard presence.update and engine.event (Presence/ChatPresence)
+            let rawId = payload.id || payload.data?.From || payload.data?.Chat;
+            let status = payload.presence || payload.presences?.[0]?.lastKnownPresence || payload.data?.State;
 
-            // Fix: Resolve LID to JID if possible
-            let resolvedId = payload.id;
-            if (resolvedId.includes('@lid') && lidCache.has(resolvedId)) {
-                const jid = lidCache.get(resolvedId);
-                console.log(`🔄 Resolving Presence LID ${resolvedId} -> ${jid}`);
-                resolvedId = jid;
+            // Handle engine.event specific structure
+            if (event === 'engine.event') {
+                if (payload?.event === 'events.Presence') {
+                    status = payload.data?.Unavailable === false ? 'online' : 'offline';
+                }
+                // State is handled above for ChatPresence
             }
 
-            console.log(`👤 Presence Update: ${payload.id} (${resolvedId}) is ${status}`);
+            // Standardize: 'paused' means they stopped typing but are still online
+            if (status === 'paused') status = 'online';
+
+            if (!rawId) return res.status(200).send({ status: 'ignored_no_id' });
+
+            let resolvedId = rawId;
+            if (resolvedId.includes('@lid') && lidCache.has(resolvedId)) {
+                resolvedId = lidCache.get(resolvedId);
+            }
+
+            // NORMALIZE BEFORE EMITTING
+            const finalId = normalizeJid(resolvedId);
+            const originalNormalized = normalizeJid(rawId);
+
+            console.log(`👤 Presence (${event}/${payload?.event || ''}): ${rawId} -> ${finalId} [${status}]`);
             io.emit('presence.update', {
                 session: sessionName,
-                chatId: resolvedId, // Send the resolved JID to frontend
+                chatId: finalId,
+                originalId: originalNormalized,
                 status: status
             });
         }

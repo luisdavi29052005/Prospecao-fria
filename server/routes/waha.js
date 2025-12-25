@@ -3,6 +3,14 @@ const router = express.Router();
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
+const ffmpeg = require('fluent-ffmpeg');
+const ffmpegPath = require('ffmpeg-static');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+// Set ffmpeg path
+ffmpeg.setFfmpegPath(ffmpegPath);
 
 // Initialize Supabase Client
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -31,11 +39,100 @@ const getWahaConfig = async () => {
     }
 };
 
+const createWahaMultipartRequest = async (method, endpoint, formData, headers = {}) => {
+    const config = await getWahaConfig();
+    let baseUrl = config.baseUrl.replace(/\/$/, '');
+
+    // Logic: Ensure we have ONE /api prefix in the final URL
+    let cleanEndpoint = endpoint;
+    if (!endpoint.startsWith('/')) cleanEndpoint = '/' + endpoint;
+
+    if (baseUrl.endsWith('/api') && cleanEndpoint.startsWith('/api')) {
+        cleanEndpoint = cleanEndpoint.substring(4);
+    } else if (!baseUrl.endsWith('/api') && !cleanEndpoint.startsWith('/api')) {
+        cleanEndpoint = '/api' + cleanEndpoint;
+    }
+
+    const url = `${baseUrl}${cleanEndpoint}`;
+    console.log(`🌐 WAHA Multipart: ${method} ${url}`);
+
+    const finalHeaders = {
+        ...headers,
+        'accept': 'application/json'
+    };
+
+    if (config.apiKey) {
+        finalHeaders['X-Api-Key'] = config.apiKey;
+    }
+
+    // Calculate length for Content-Length header
+    const getLength = (formData) => new Promise((resolve, reject) => {
+        formData.getLength((err, length) => {
+            if (err) reject(err);
+            else resolve(length);
+        });
+    });
+
+    let contentLength = 0;
+    try {
+        contentLength = await getLength(formData);
+    } catch (e) {
+        console.warn('⚠️ Could not calculate form data length:', e.message);
+    }
+
+    const multipartHeaders = formData.getHeaders();
+    if (contentLength > 0) {
+        multipartHeaders['Content-Length'] = contentLength;
+    }
+
+    try {
+        const response = await axios({
+            method,
+            url,
+            data: formData,
+            headers: {
+                ...finalHeaders,
+                ...multipartHeaders
+            },
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity,
+            responseType: 'arraybuffer' // We expect a file back
+        });
+        return response;
+    } catch (error) {
+        let errorData = error.response?.data;
+        if (errorData instanceof ArrayBuffer) {
+            // Convert ArrayBuffer back to string if it's an error message
+            errorData = Buffer.from(errorData).toString();
+            try { errorData = JSON.parse(errorData); } catch (e) { }
+        }
+
+        console.error(`WAHA Multi-part Error [${method} ${url}]:`, errorData || error.message);
+        throw {
+            status: error.response?.status || 500,
+            data: errorData || { error: error.message },
+            message: error.message
+        };
+    }
+};
+
 // Create axios request helper
 const createWahaRequest = async (method, endpoint, data = null) => {
     const config = await getWahaConfig();
-    const baseUrl = config.baseUrl.replace(/\/$/, '');
-    const url = `${baseUrl}${endpoint}`;
+    let baseUrl = config.baseUrl.replace(/\/$/, '');
+
+    // Logic: Ensure we have ONE /api prefix in the final URL
+    let cleanEndpoint = endpoint;
+    if (!endpoint.startsWith('/')) cleanEndpoint = '/' + endpoint;
+
+    if (baseUrl.endsWith('/api') && cleanEndpoint.startsWith('/api')) {
+        cleanEndpoint = cleanEndpoint.substring(4);
+    } else if (!baseUrl.endsWith('/api') && !cleanEndpoint.startsWith('/api')) {
+        cleanEndpoint = '/api' + cleanEndpoint;
+    }
+
+    const url = `${baseUrl}${cleanEndpoint}`;
+    console.log(`🌐 WAHA Request: ${method} ${url}`);
 
     const headers = {
         'Content-Type': 'application/json',
@@ -62,6 +159,16 @@ const createWahaRequest = async (method, endpoint, data = null) => {
         };
     }
 };
+
+// --- Config Route ---
+router.get('/config', async (req, res) => {
+    try {
+        const config = await getWahaConfig();
+        res.json(config);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 
 // Helper to emit session update event via Socket.io
 const emitSessionUpdate = (req) => {
@@ -361,6 +468,101 @@ router.post('/sendVideo', async (req, res) => {
         res.json(data);
     } catch (error) {
         console.error('Error sending video:', error.message);
+        res.status(error.status || 500).json(error.data || { error: error.message });
+    }
+});
+
+const multer = require('multer');
+const upload = multer();
+const FormData = require('form-data');
+
+router.post('/:session/media/convert/voice', upload.single('file'), async (req, res) => {
+    let inputPath = null;
+    let outputPath = null;
+
+    try {
+        const { session } = req.params;
+        const file = req.file;
+        console.log(`🎙️ Local Conversion Request: Session=${session}, File=${file?.originalname} (${file?.size} bytes) Mime=${file?.mimetype}`);
+
+        if (!file) {
+            console.error('❌ No file in conversion request');
+            return res.status(400).json({ error: 'No file uploaded' });
+        }
+
+        // Create temporary file paths
+        const tempDir = os.tmpdir();
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        inputPath = path.join(tempDir, `input-${uniqueSuffix}.webm`);
+        outputPath = path.join(tempDir, `output-${uniqueSuffix}.ogg`);
+
+        // Write buffer to temp file
+        await fs.promises.writeFile(inputPath, file.buffer);
+
+        console.log(`🔄 Converting locally: ${inputPath} -> ${outputPath}`);
+
+        // Perform conversion using fluent-ffmpeg
+        await new Promise((resolve, reject) => {
+            ffmpeg(inputPath)
+                .toFormat('ogg')
+                .audioCodec('libopus')
+                .on('end', () => resolve())
+                .on('error', (err) => reject(err))
+                .save(outputPath);
+        });
+
+        // Read the converted file
+        const convertedBuffer = await fs.promises.readFile(outputPath);
+
+        console.log(`✅ Local voice conversion successful (${convertedBuffer.length} bytes)`);
+
+        res.setHeader('Content-Type', 'audio/ogg; codecs=opus');
+        res.send(convertedBuffer);
+
+    } catch (error) {
+        console.error('❌ Error converting voice locally:', error.message);
+        console.error(error);
+        res.status(500).json({ error: 'Local conversion failed: ' + error.message });
+    } finally {
+        // Cleanup temp files
+        try {
+            if (inputPath && fs.existsSync(inputPath)) await fs.promises.unlink(inputPath);
+            if (outputPath && fs.existsSync(outputPath)) await fs.promises.unlink(outputPath);
+        } catch (cleanupErr) {
+            console.warn('⚠️ Failed to cleanup temp files:', cleanupErr.message);
+        }
+    }
+});
+
+router.post('/:session/media/convert/video', upload.single('file'), async (req, res) => {
+    try {
+        const { session } = req.params;
+        const file = req.file;
+        console.log(`🎬 Conversion Request: Session=${session}, File=${file?.originalname} (${file?.size} bytes)`);
+
+        if (!file) {
+            console.error('❌ No file in conversion request');
+            return res.status(400).json({ error: 'No file uploaded' });
+        }
+
+        const formData = new FormData();
+        // Force filename and content-type
+        formData.append('file', file.buffer, {
+            filename: 'video_message.mp4',
+            contentType: 'video/mp4'
+        });
+
+        // Endpoint: createWahaMultipartRequest will handle the /api prefix
+        const response = await createWahaMultipartRequest('POST', `/${session}/media/convert/video`, formData);
+
+        console.log(`✅ Video converted successfully (${response.data.length} bytes)`);
+        res.setHeader('Content-Type', 'video/mp4');
+        res.send(response.data);
+    } catch (error) {
+        console.error('❌ Error converting video:', error.message);
+        if (error.data) {
+            console.error('📦 Error details:', typeof error.data === 'string' ? error.data : JSON.stringify(error.data, null, 2));
+        }
         res.status(error.status || 500).json(error.data || { error: error.message });
     }
 });

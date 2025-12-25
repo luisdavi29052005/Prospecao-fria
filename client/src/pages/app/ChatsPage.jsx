@@ -6,12 +6,42 @@ import Button from '../../components/Button';
 import {
     Wifi, WifiOff, RefreshCw, Loader, MessageSquare, Check, Play,
     AlertTriangle, Search, Filter, Paperclip, Plus, Image as ImageIcon,
-    FileText, Camera, Mic, Smile, X, LogOut, MoreVertical, SlidersHorizontal, ChevronDown
+    FileText, Camera, Mic, Smile, X, LogOut, MoreVertical, SlidersHorizontal, ChevronDown, Trash2
 } from 'lucide-react';
 import ChatsSkeleton from '../../components/skeletons/ChatsSkeleton';
 import MinimalAudioPlayer from '../../components/MinimalAudioPlayer';
 import { supabase } from '../../lib/supabaseClient';
 import { wahaService } from '../../services/waha';
+
+// ----------------------------------------------------------------------------
+// UTILS
+// ----------------------------------------------------------------------------
+const normalizeJid = (jid) => {
+    if (!jid) return jid;
+    // 1. Remove device identifiers (551899...:46@s.whatsapp.net -> 551899...@s.whatsapp.net)
+    let clean = jid.replace(/:\d+@/, '@');
+    // 2. Normalize domains (@c.us -> @s.whatsapp.net)
+    clean = clean.replace('@c.us', '@s.whatsapp.net');
+    return clean.toLowerCase().trim();
+};
+
+const getDateLabel = (date) => {
+    const d = new Date(date);
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    const messageDate = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+
+    if (messageDate.getTime() === today.getTime()) {
+        return 'Hoje';
+    } else if (messageDate.getTime() === yesterday.getTime()) {
+        return 'Ontem';
+    } else {
+        return d.toLocaleDateString('pt-BR', { day: 'numeric', month: 'long', year: messageDate.getFullYear() !== now.getFullYear() ? 'numeric' : undefined });
+    }
+};
 
 const ChatsPage = () => {
     const { user, logout } = useAuth();
@@ -42,6 +72,7 @@ const ChatsPage = () => {
     const [messages, setMessages] = useState([]);
     const [inputValue, setInputValue] = useState('');
     const [presence, setPresence] = useState({}); // { chatId: 'composing' | 'recording' | 'available' }
+    const [showChatMenu, setShowChatMenu] = useState(false);
 
     // Checkpoint for auto-scroll
     const messagesEndRef = useRef(null);
@@ -150,37 +181,42 @@ const ChatsPage = () => {
 
                     const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
 
-                    // Convert to base64 for WAHA
-                    const reader = new FileReader();
-                    reader.readAsDataURL(audioBlob);
+                    const processAndSend = async (blob) => {
+                        const reader = new FileReader();
+                        reader.readAsDataURL(blob);
 
-                    reader.onloadend = async () => {
-                        // Strip "data:audio/...;base64," header
-                        const base64Data = reader.result.split(',')[1];
+                        reader.onloadend = async () => {
+                            const base64Data = reader.result.split(',')[1];
+                            try {
+                                const targetId = selectedLead.chat_id || selectedLead.phone || selectedLead.id;
+                                const waMimeType = 'audio/ogg; codecs=opus';
 
-                        try {
-                            const targetId = selectedLead.chat_id || selectedLead.phone || selectedLead.id;
-
-                            // Force OGG/Opus for WhatsApp compatibility (Waha handles conversion/container)
-                            const waMimeType = 'audio/ogg; codecs=opus';
-
-                            await wahaService.sendVoice({
-                                chatId: targetId,
-                                file: {
-                                    mimetype: waMimeType,
-                                    filename: 'voice_message.ogg',
-                                    data: base64Data
-                                },
-                                session: activeSession.name
-                            });
-                            console.log('Voice message sent!');
-                        } catch (err) {
-                            console.error('Error sending voice:', err);
-                            alert('Erro ao enviar áudio. Verifique o console.');
-                        }
+                                await wahaService.sendVoice({
+                                    chatId: targetId,
+                                    file: {
+                                        mimetype: waMimeType,
+                                        filename: 'voice_message.ogg',
+                                        data: base64Data
+                                    },
+                                    session: activeSession.name
+                                });
+                                console.log('Voice message sent!');
+                            } catch (err) {
+                                console.error('Error sending voice:', err);
+                                alert('Erro ao enviar áudio. Verifique o console.');
+                            }
+                        };
                     };
+
+                    try {
+                        console.log('🎬 Converting recorded voice...');
+                        const convertedBlob = await wahaService.convertVoice(activeSession.name, audioBlob);
+                        await processAndSend(convertedBlob);
+                    } catch (convErr) {
+                        console.warn('⚠️ Conversion failed, sending original blob:', convErr);
+                        await processAndSend(audioBlob);
+                    }
                 }
-                resolve();
                 resolve();
             };
 
@@ -198,15 +234,64 @@ const ChatsPage = () => {
         return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
     };
 
+    const handleDeleteMessages = async () => {
+        if (!selectedLead || !activeSession) return;
+
+        const confirmDelete = window.confirm("Deseja realmente apagar TODAS as mensagens desta conversa?");
+        if (!confirmDelete) return;
+
+        try {
+            // Use selectedLead.id which is the UUID in the messages.chat_id column
+            const { error } = await supabase
+                .from('messages')
+                .delete()
+                .eq('chat_id', selectedLead.id);
+
+            if (error) {
+                console.error('Error deleting messages:', error.message);
+                alert('Erro ao apagar mensagens: ' + error.message);
+            } else {
+                setMessages([]);
+                setShowChatMenu(false);
+            }
+        } catch (err) {
+            console.error('Delete error:', err);
+        }
+    };
+
     const handleFileUpload = async (e) => {
         const file = e.target.files[0];
         if (!file || !selectedLead || !activeSession) return;
 
         try {
-            const filename = `${Date.now()}_${file.name}`;
+            let fileToUpload = file;
+            let finalType = file.type;
+
+            // Media Conversion for Audio/Video
+            if (file.type.startsWith('audio/') || file.type.startsWith('video/')) {
+                console.log(`🎬 Converting ${file.type}...`);
+                try {
+                    const convertedBlob = file.type.startsWith('audio/')
+                        ? await wahaService.convertVoice(activeSession.name, file)
+                        : await wahaService.convertVideo(activeSession.name, file);
+
+                    const extension = file.type.startsWith('audio/') ? 'ogg' : 'mp4';
+                    const newMimeType = file.type.startsWith('audio/') ? 'audio/ogg' : 'video/mp4';
+
+                    fileToUpload = new File([convertedBlob], `converted_${Date.now()}.${extension}`, {
+                        type: newMimeType
+                    });
+                    finalType = newMimeType;
+                    console.log(`✅ Conversion successful: ${finalType}`);
+                } catch (convErr) {
+                    console.warn('⚠️ Conversion failed, sending original file:', convErr);
+                }
+            }
+
+            const filename = `${Date.now()}_${fileToUpload.name}`;
             const { data, error } = await supabase.storage
                 .from('chat-media')
-                .upload(`${activeSession.name}/${selectedLead.id}/${filename}`, file);
+                .upload(`${activeSession.name}/${selectedLead.id}/${filename}`, fileToUpload);
 
             if (error) throw error;
 
@@ -219,18 +304,18 @@ const ChatsPage = () => {
                 chatId: selectedLead.chat_id || selectedLead.phone,
                 file: {
                     url: publicUrl,
-                    headers: [['Content-Type', file.type]]
+                    headers: [['Content-Type', finalType]]
                 },
                 caption: file.name
             };
 
             // Detect type and send appropriate request
-            if (file.type.startsWith('image/')) {
+            if (finalType.startsWith('image/')) {
                 await wahaService.sendImage(payload);
-            } else if (file.type.startsWith('audio/')) {
+            } else if (finalType.startsWith('audio/') || finalType === 'audio/ogg') {
                 // Waha expects { url } for voice/audio
                 await wahaService.sendVoice({ ...payload, file: { url: publicUrl } });
-            } else if (file.type.startsWith('video/')) {
+            } else if (finalType.startsWith('video/')) {
                 await wahaService.sendVideo(payload);
             } else {
                 await wahaService.sendFile(payload);
@@ -324,43 +409,70 @@ const ChatsPage = () => {
         loadChats();
 
         // 🤖 Auto-Subscribe Presence for ALL loaded chats
-        // 🤖 Auto-Subscribe Presence for ALL loaded chats
         // This ensures status (Online/Typing) works for automations without clicking
-        // Also adding a periodic "heartbeat" to re-subscribe every 30s to keep it alive
         const subscribeAll = () => {
             if (activeSession && leads?.length > 0) {
-                console.log('💓 Presence Heartbeat: Subscribing all...');
+                console.log(`💓 Presence Sync: Subscribing ${leads.length} contacts...`);
                 leads.forEach(lead => {
-                    const targetId = lead.chat_id || lead.phone || lead.id;
+                    const targetId = lead.chat_id || lead.id;
                     if (targetId) wahaService.subscribePresence(activeSession.name, targetId);
                 });
             }
         };
 
-        subscribeAll(); // Initial call
-        const presenceInterval = setInterval(subscribeAll, 30000); // Repeat every 30s
+        // Re-subscribe heartbeat - keeps presence connections alive in WAHA
+        const presenceInterval = setInterval(subscribeAll, 30000);
 
-        // Real-time Chat List Updates
+        // Initial subscription
+        subscribeAll();
+
+        // Real-time Socket Listeners
         const socket = wahaService.socket;
+
+        const handlePresenceUpdate = (payload) => {
+            let { chatId, originalId, status } = payload;
+            if (status) {
+                // Standardize Status
+                let stdStatus = status.toLowerCase();
+                if (stdStatus === 'composing' || stdStatus === 'typing') stdStatus = 'typing';
+                if (stdStatus === 'available' || stdStatus === 'online' || stdStatus === 'paused') stdStatus = 'online';
+                if (stdStatus === 'unavailable' || stdStatus === 'offline') stdStatus = 'offline';
+
+                const normChatId = normalizeJid(chatId);
+                const normOriginalId = normalizeJid(originalId);
+
+                setPresence(prev => {
+                    const next = { ...prev };
+                    let changed = false;
+
+                    if (normChatId && prev[normChatId] !== stdStatus) {
+                        next[normChatId] = stdStatus;
+                        changed = true;
+                    }
+                    if (normOriginalId && normOriginalId !== normChatId && prev[normOriginalId] !== stdStatus) {
+                        next[normOriginalId] = stdStatus;
+                        changed = true;
+                    }
+                    return changed ? next : prev;
+                });
+            }
+        };
+
         const handleChatUpdate = (payload) => {
-            console.log('🔄 Chat Update Payload:', payload);
-            // Fix: Extract chatId from root payload first
+            console.log('🔄 Chat List Update:', payload);
             const chatId = payload.chatId || payload.chat?.id || payload.message?.chatId;
             const msg = payload.message || payload;
+            const body = msg.body || (['image', 'video', 'ptt', 'audio'].includes(msg.type) ? 'Mídia' : '');
             const timestamp = msg.timestamp || new Date().toISOString();
-            // Expanded fallback for media types
-            const body = msg.body || ((msg.hasMedia || ['image', 'video', 'ptt', 'audio'].includes(msg.type)) ? 'Mídia' : '');
 
             if (!chatId) return;
 
             setLeads(prevLeads => {
                 const existingIndex = prevLeads.findIndex(l => l.id === chatId || l.chat_id === chatId);
-
                 if (existingIndex > -1) {
-                    // Update existing
                     const updatedLeads = [...prevLeads];
                     const chat = updatedLeads[existingIndex];
-                    updatedLeads.splice(existingIndex, 1); // remove
+                    updatedLeads.splice(existingIndex, 1);
                     updatedLeads.unshift({
                         ...chat,
                         last_message: body,
@@ -368,9 +480,7 @@ const ChatsPage = () => {
                     });
                     return updatedLeads;
                 } else {
-                    console.log(`🆕 New chat detected ${chatId}, reloading...`);
-                    // Start full reload for new chats to get proper metadata
-                    loadChats();
+                    loadChats(); // New chat found
                     return prevLeads;
                 }
             });
@@ -378,20 +488,9 @@ const ChatsPage = () => {
 
         if (socket && activeSession) {
             socket.on('message', handleChatUpdate);
-
-            socket.on('presence.update', (payload) => {
-                console.log('👤 Presence Update:', payload);
-                if (payload.chatId && payload.status) {
-                    setPresence(prev => ({
-                        ...prev,
-                        [payload.chatId]: payload.status
-                    }));
-                }
-            });
-
-            // Re-subscribe on reconnect
+            socket.on('presence.update', handlePresenceUpdate);
             socket.on('connect', () => {
-                console.log('🟢 Socket Reconnected: Refreshing presence...');
+                console.log('🟢 Socket Reconnected: Re-subscribing presence...');
                 subscribeAll();
             });
         }
@@ -400,11 +499,11 @@ const ChatsPage = () => {
             clearInterval(presenceInterval);
             if (socket) {
                 socket.off('message', handleChatUpdate);
-                socket.off('presence.update');
+                socket.off('presence.update', handlePresenceUpdate);
                 socket.off('connect');
             }
         };
-    }, [activeSession?.name]);
+    }, [activeSession?.name, leads?.length]); // Run when session changes OR lead count changes
 
     // Fetch messages for selected chat
     useEffect(() => {
@@ -636,6 +735,14 @@ const ChatsPage = () => {
     if (isConnected) {
         return (
             <div style={{ height: '100%', display: 'flex', width: '100%', background: '#F8FAFC', overflow: 'hidden' }}>
+                <style>{`
+                    @keyframes dropdownIn {
+                        from { opacity: 0; transform: translateY(-10px) scale(0.95); }
+                        to { opacity: 1; transform: translateY(0) scale(1); }
+                    }
+                    .animate-dropdown { animation: dropdownIn 0.2s ease-out forwards; }
+                `}</style>
+
                 {/* Left Column: Solid & Continuous */}
                 <div style={{
                     width: '360px',
@@ -895,9 +1002,27 @@ const ChatsPage = () => {
                                     {(lead.name || lead.phone)?.substring(0, 2).toUpperCase() || '??'}
                                 </div>
                                 <div style={{ flex: 1, overflow: 'hidden' }}>
-                                    <div style={{ fontSize: '14px', fontWeight: '600', color: '#1E293B', marginBottom: '4px' }}>{lead.name || lead.phone || 'Desconhecido'}</div>
+                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
+                                        <div style={{ fontSize: '14px', fontWeight: '600', color: '#1E293B' }}>
+                                            {lead.name || lead.phone || 'Desconhecido'}
+                                        </div>
+
+                                        {/* Status Dot */}
+                                        <div style={{
+                                            width: '8px',
+                                            height: '8px',
+                                            borderRadius: '50%',
+                                            background: (presence[normalizeJid(lead.chat_id)] === 'online' || presence[normalizeJid(lead.id)] === 'online') ? '#22c55e' :
+                                                (presence[normalizeJid(lead.chat_id)] === 'typing' || presence[normalizeJid(lead.id)] === 'typing') ? '#3b82f6' : '#E2E8F0',
+                                            transition: 'background 0.3s ease'
+                                        }} title={presence[normalizeJid(lead.chat_id)] || presence[normalizeJid(lead.id)] || 'offline'} />
+                                    </div>
                                     <div style={{ fontSize: '12px', color: '#64748B', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                        {lead.last_message || 'Nenhuma mensagem...'}
+                                        {presence[normalizeJid(lead.chat_id)] === 'typing' || presence[normalizeJid(lead.id)] === 'typing' ? (
+                                            <span style={{ color: '#3b82f6', fontWeight: '500' }}>Digitando...</span>
+                                        ) : (
+                                            lead.last_message || 'Nenhuma mensagem...'
+                                        )}
                                     </div>
                                 </div>
                             </div>
@@ -953,90 +1078,198 @@ const ChatsPage = () => {
                                     {(selectedLead.name || selectedLead.phone)?.substring(0, 2).toUpperCase() || '??'}
                                 </div>
                                 <div style={{ flex: 1, overflow: 'hidden' }}>
-                                    <div style={{ fontSize: '14px', fontWeight: '600', color: 'var(--text-primary)', marginBottom: '2px' }}>{selectedLead.name || selectedLead.phone || 'Desconhecido'}</div>
+                                    <div style={{ fontSize: '14px', fontWeight: '600', color: 'var(--text-primary)', marginBottom: '4px' }}>{selectedLead.name || selectedLead.phone || 'Desconhecido'}</div>
                                     <div style={{ fontSize: '12px', color: '#94A3B8', display: 'flex', alignItems: 'center', gap: '6px' }}>
                                         <div style={{
                                             width: '8px', height: '8px', borderRadius: '50%',
-                                            background: (presence[selectedLead.chat_id || selectedLead.phone || selectedLead.id] === 'composing' || presence[selectedLead.chat_id || selectedLead.phone || selectedLead.id] === 'available') ? '#22c55e' : '#cbd5e1'
+                                            background: (presence[normalizeJid(selectedLead.chat_id)] === 'online' || presence[normalizeJid(selectedLead.id)] === 'online') ? '#22c55e' :
+                                                (presence[normalizeJid(selectedLead.chat_id)] === 'typing' || presence[normalizeJid(selectedLead.id)] === 'typing') ? '#3B82F6' : '#94A3B8',
+                                            transition: 'all 0.3s ease'
                                         }} />
-                                        {presence[selectedLead.chat_id || selectedLead.phone || selectedLead.id] === 'composing' ? 'Digitando...' :
-                                            (presence[selectedLead.chat_id || selectedLead.phone || selectedLead.id] === 'available' ? 'Online' : 'Offline')}
+                                        <span style={{
+                                            color: (presence[normalizeJid(selectedLead.chat_id)] === 'typing' || presence[normalizeJid(selectedLead.id)] === 'typing') ? '#3B82F6' : '#94A3B8',
+                                            fontWeight: (presence[normalizeJid(selectedLead.chat_id)] === 'typing' || presence[normalizeJid(selectedLead.id)] === 'typing') ? '600' : '400'
+                                        }}>
+                                            {presence[normalizeJid(selectedLead.chat_id)] === 'typing' || presence[normalizeJid(selectedLead.id)] === 'typing' ? 'Digitando...' :
+                                                (presence[normalizeJid(selectedLead.chat_id)] === 'online' || presence[normalizeJid(selectedLead.id)] === 'online' ? 'Online' : 'Offline')}
+                                        </span>
                                     </div>
+                                </div>
+
+                                {/* Header Actions */}
+                                <div style={{ position: 'relative' }}>
+                                    <button
+                                        onClick={() => setShowChatMenu(!showChatMenu)}
+                                        style={{
+                                            background: 'transparent',
+                                            border: 'none',
+                                            cursor: 'pointer',
+                                            width: '32px',
+                                            height: '32px',
+                                            borderRadius: '8px',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            color: '#64748B',
+                                            transition: 'all 0.2s',
+                                            background: showChatMenu ? '#F1F5F9' : 'transparent'
+                                        }}
+                                    >
+                                        <MoreVertical size={18} />
+                                    </button>
+
+                                    {/* Dropdown Menu */}
+                                    {showChatMenu && (
+                                        <>
+                                            <div
+                                                onClick={() => setShowChatMenu(false)}
+                                                style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 90 }}
+                                            />
+                                            <div style={{
+                                                position: 'absolute',
+                                                top: '40px',
+                                                right: 0,
+                                                width: '180px',
+                                                background: '#FFFFFF',
+                                                borderRadius: '12px',
+                                                boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)',
+                                                border: '1px solid #E2E8F0',
+                                                zIndex: 100,
+                                                padding: '6px',
+                                                animation: 'dropdownIn 0.2s ease-out forwards'
+                                            }}>
+                                                <button
+                                                    onClick={handleDeleteMessages}
+                                                    style={{
+                                                        width: '100%',
+                                                        padding: '10px 12px',
+                                                        display: 'flex',
+                                                        alignItems: 'center',
+                                                        gap: '10px',
+                                                        background: 'transparent',
+                                                        border: 'none',
+                                                        borderRadius: '8px',
+                                                        cursor: 'pointer',
+                                                        color: '#EF4444',
+                                                        fontSize: '13px',
+                                                        fontWeight: '500',
+                                                        transition: 'all 0.2s'
+                                                    }}
+                                                    onMouseEnter={(e) => e.currentTarget.style.background = '#FEF2F2'}
+                                                    onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                                                >
+                                                    <Trash2 size={16} />
+                                                    Apagar mensagens
+                                                </button>
+                                            </div>
+                                        </>
+                                    )}
                                 </div>
                             </div>
 
                             {/* Messages Area */}
-                            <div style={{ flex: 1, padding: '24px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                            <div style={{ flex: 1, padding: '24px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px' }}>
                                 {
-                                    messages.length > 0 ? messages.map((msg) => {
-                                        return (
-                                            <div key={msg.id} className="animate-slide-in" style={{
-                                                alignSelf: msg.from_me ? 'flex-end' : 'flex-start',
-                                                maxWidth: '65%',
-                                                padding: '12px 18px',
-                                                borderRadius: '18px', // Slightly softer radius
-                                                // Softer Blue Gradient vs Light Gray
-                                                background: msg.from_me ? 'linear-gradient(135deg, #60A5FA 0%, #3B82F6 100%)' : '#F9FAFB',
-                                                color: msg.from_me ? '#ffffff' : '#1f2937', // Darker text for light bg
-                                                fontSize: '14.5px',
-                                                lineHeight: '22px',
-                                                boxShadow: '0 1px 2px rgba(0,0,0,0.05)', // Subtle shadow
-                                                borderBottomRightRadius: msg.from_me ? '4px' : '18px',
-                                                borderBottomLeftRadius: msg.from_me ? '18px' : '4px',
-                                                position: 'relative',
-                                                marginBottom: '6px',
-                                                border: !msg.from_me ? '1px solid #F3F4F6' : 'none' // Subtle border for received
-                                            }}>
-                                                {/* Media Handling */}
-                                                {(msg.type === 'image' && (msg.media_url || msg.mediaUrl)) && (
-                                                    <img
-                                                        src={msg.media_url || msg.mediaUrl}
-                                                        alt="Imagem"
-                                                        style={{
-                                                            maxWidth: '300px',
-                                                            maxHeight: '300px',
-                                                            width: 'auto',
-                                                            height: 'auto',
-                                                            borderRadius: '8px',
-                                                            marginBottom: '4px',
-                                                            display: 'block',
-                                                            objectFit: 'cover',
-                                                            cursor: 'pointer'
-                                                        }}
-                                                        onClick={() => window.open(msg.media_url || msg.mediaUrl, '_blank')}
-                                                    />
-                                                )}
+                                    messages.length > 0 ? (() => {
+                                        let lastDateLabel = null;
+                                        return messages.map((msg, index) => {
+                                            const currentDateLabel = getDateLabel(msg.timestamp);
+                                            const showSeparator = currentDateLabel !== lastDateLabel;
+                                            lastDateLabel = currentDateLabel;
 
-                                                {(msg.type === 'video' && (msg.media_url || msg.mediaUrl)) && (
-                                                    <video
-                                                        src={msg.media_url || msg.mediaUrl}
-                                                        controls
-                                                        style={{
-                                                            maxWidth: '300px',
-                                                            maxHeight: '300px',
-                                                            borderRadius: '8px',
-                                                            marginBottom: '4px'
-                                                        }}
-                                                    />
-                                                )}
+                                            return (
+                                                <React.Fragment key={msg.id}>
+                                                    {showSeparator && (
+                                                        <div style={{
+                                                            display: 'flex',
+                                                            justifyContent: 'center',
+                                                            margin: '16px 0',
+                                                            position: 'relative'
+                                                        }}>
+                                                            <div style={{
+                                                                background: '#F1F5F9', // Pale gray/blue background
+                                                                color: '#64748B', // Muted slate color
+                                                                padding: '6px 16px',
+                                                                borderRadius: '12px',
+                                                                fontSize: '11px',
+                                                                fontWeight: '600',
+                                                                textTransform: 'uppercase',
+                                                                letterSpacing: '0.5px',
+                                                                boxShadow: '0 1px 2px rgba(0,0,0,0.05)'
+                                                            }}>
+                                                                {currentDateLabel}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                    <div className="animate-slide-in" style={{
+                                                        alignSelf: msg.from_me ? 'flex-end' : 'flex-start',
+                                                        maxWidth: '65%',
+                                                        padding: '12px 18px',
+                                                        borderRadius: '18px',
+                                                        background: msg.from_me ? 'linear-gradient(135deg, #60A5FA 0%, #3B82F6 100%)' : '#FFFFFF',
+                                                        color: msg.from_me ? '#ffffff' : '#1E293B',
+                                                        fontSize: '14.5px',
+                                                        lineHeight: '22px',
+                                                        boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
+                                                        borderBottomRightRadius: msg.from_me ? '4px' : '18px',
+                                                        borderBottomLeftRadius: msg.from_me ? '18px' : '4px',
+                                                        position: 'relative',
+                                                        marginBottom: '4px',
+                                                        border: !msg.from_me ? '1px solid #F1F5F9' : 'none'
+                                                    }}>
+                                                        {/* Media Handling */}
+                                                        {(msg.type === 'image' && (msg.media_url || msg.mediaUrl)) && (
+                                                            <img
+                                                                src={msg.media_url || msg.mediaUrl}
+                                                                alt="Imagem"
+                                                                style={{
+                                                                    maxWidth: '300px',
+                                                                    maxHeight: '300px',
+                                                                    width: 'auto',
+                                                                    height: 'auto',
+                                                                    borderRadius: '8px',
+                                                                    marginBottom: '4px',
+                                                                    display: 'block',
+                                                                    objectFit: 'cover',
+                                                                    cursor: 'pointer'
+                                                                }}
+                                                                onClick={() => window.open(msg.media_url || msg.mediaUrl, '_blank')}
+                                                            />
+                                                        )}
 
-                                                {((msg.type === 'ptt' || msg.type === 'audio') && (msg.media_url || msg.mediaUrl)) && (
-                                                    <MinimalAudioPlayer
-                                                        src={msg.media_url || msg.mediaUrl}
-                                                        incoming={!msg.from_me}
-                                                    />
-                                                )}
+                                                        {(msg.type === 'video' && (msg.media_url || msg.mediaUrl)) && (
+                                                            <video
+                                                                src={msg.media_url || msg.mediaUrl}
+                                                                controls
+                                                                style={{
+                                                                    maxWidth: '300px',
+                                                                    maxHeight: '300px',
+                                                                    borderRadius: '8px',
+                                                                    marginBottom: '4px'
+                                                                }}
+                                                            />
+                                                        )}
 
-                                                {/* Text body */}
-                                                {msg.body && (msg.type !== 'image' && msg.type !== 'video' && msg.type !== 'ptt' && msg.type !== 'audio' ? msg.body : (msg.body !== 'Mídia' && msg.body !== 'Áudio' ? msg.body : null))}
-                                                <div style={{ fontSize: '11px', opacity: 0.6, marginTop: '4px', textAlign: 'right', fontWeight: 500 }}>
-                                                    {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                                </div>
-                                            </div>
-                                        );
-                                    }) : (
-                                        <div style={{ textAlign: 'center', color: '#71717a', marginTop: '40px' }}>
-                                            <p>Início da conversa</p>
+                                                        {((msg.type === 'ptt' || msg.type === 'audio') && (msg.media_url || msg.mediaUrl)) && (
+                                                            <MinimalAudioPlayer
+                                                                src={msg.media_url || msg.mediaUrl}
+                                                                incoming={!msg.from_me}
+                                                            />
+                                                        )}
+
+                                                        {/* Text body */}
+                                                        {msg.body && (msg.type !== 'image' && msg.type !== 'video' && msg.type !== 'ptt' && msg.type !== 'audio' ? msg.body : (msg.body !== 'Mídia' && msg.body !== 'Áudio' ? msg.body : null))}
+                                                        <div style={{ fontSize: '10px', opacity: 0.7, marginTop: '4px', textAlign: 'right', fontWeight: 500, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '4px' }}>
+                                                            {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                            {msg.from_me && <Check size={12} style={{ opacity: 0.8 }} />}
+                                                        </div>
+                                                    </div>
+                                                </React.Fragment>
+                                            );
+                                        });
+                                    })() : (
+                                        <div style={{ textAlign: 'center', color: '#94A3B8', marginTop: '40px' }}>
+                                            <p style={{ fontSize: '13px' }}>Início da conversa</p>
                                         </div>
                                     )
                                 }

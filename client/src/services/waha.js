@@ -152,5 +152,84 @@ export const wahaService = {
         });
         if (!response.ok) throw new Error('Failed to send video');
         return response.json();
+    },
+
+    // Media Conversion
+    convertVoice: async (session, file) => {
+        try {
+            // 1. Try to get the WAHA URL from the backend config
+            const configRes = await fetch(`${API_URL}/config`);
+            const config = configRes.ok ? await configRes.json() : { baseUrl: 'http://localhost:3000/api' };
+            const wahaBase = config.baseUrl.replace(/\/$/, '');
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            // 2. Try calling WAHA directly (User's preferred method)
+            let directUrl = wahaBase;
+            const endpoint = `/${session}/media/convert/voice`;
+            if (directUrl.endsWith('/api')) {
+                directUrl += endpoint;
+            } else {
+                directUrl += '/api' + endpoint;
+            }
+
+            console.log(`🎬 Attempting direct conversion: ${directUrl}`);
+            const response = await fetch(directUrl, {
+                method: 'POST',
+                body: formData
+            });
+            if (!response.ok) throw new Error('Direct conversion failed');
+            return response.blob();
+        } catch (err) {
+            console.warn('⚠️ Direct conversion failed (CORS or server down), trying proxy:', err.message);
+            // 3. Fallback to proxy (Port 8000) - I've fixed the 500 error there
+            const formData = new FormData();
+            formData.append('file', file);
+            const response = await fetch(`${API_URL}/${session}/media/convert/voice`, {
+                method: 'POST',
+                body: formData
+            });
+            if (!response.ok) throw new Error('Failed to convert voice via proxy');
+            return response.blob();
+        }
+    },
+
+    convertVideo: async (session, file) => {
+        try {
+            const configRes = await fetch(`${API_URL}/config`);
+            const config = configRes.ok ? await configRes.json() : { baseUrl: 'http://localhost:3000/api' };
+            const wahaBase = config.baseUrl.replace(/\/$/, '');
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            // Same logic for video
+            let directUrl = wahaBase;
+            const endpoint = `/${session}/media/convert/video`;
+            if (directUrl.endsWith('/api')) {
+                directUrl += endpoint;
+            } else {
+                directUrl += '/api' + endpoint;
+            }
+
+            console.log(`🎬 Attempting direct conversion: ${directUrl}`);
+            const response = await fetch(directUrl, {
+                method: 'POST',
+                body: formData
+            });
+            if (!response.ok) throw new Error('Direct conversion failed');
+            return response.blob();
+        } catch (err) {
+            console.warn('⚠️ Direct conversion failed, trying proxy:', err.message);
+            const formData = new FormData();
+            formData.append('file', file);
+            const response = await fetch(`${API_URL}/${session}/media/convert/video`, {
+                method: 'POST',
+                body: formData
+            });
+            if (!response.ok) throw new Error('Failed to convert video via proxy');
+            return response.blob();
+        }
     }
 };
