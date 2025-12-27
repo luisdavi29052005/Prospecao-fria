@@ -41,35 +41,40 @@ export const wahaService = {
         return response.json();
     },
 
-    // Session Actions
+    // Session Actions - DIRECT WAHA CALLS (localhost:3000)
     startSession: async (session) => {
-        const response = await fetch(`${API_URL}/sessions/${session}/start`, { method: 'POST' });
+        const response = await fetch(`http://localhost:3000/api/sessions/${session}/start`, { method: 'POST' });
         if (!response.ok) throw new Error('Failed to start session');
-        return response.json();
+        return true;
     },
 
     stopSession: async (session) => {
-        const response = await fetch(`${API_URL}/sessions/${session}/stop`, { method: 'POST' });
+        const response = await fetch(`http://localhost:3000/api/sessions/${session}/stop`, { method: 'POST' });
         if (!response.ok) throw new Error('Failed to stop session');
-        return response.json();
+        return true;
     },
 
     logoutSession: async (session) => {
-        const response = await fetch(`${API_URL}/sessions/${session}/logout`, { method: 'POST' });
+        const response = await fetch(`http://localhost:3000/api/sessions/${session}/logout`, { method: 'POST' });
         if (!response.ok) throw new Error('Failed to logout session');
-        return response.json();
+        return true;
     },
 
     getMe: async (session) => {
+        // Keep getMe on proxy for now unless requested otherwise, or safer to stick to pattern? 
+        // User said "put all these route configurations to work right". 
+        // getMe wasn't explicitly listed but fits "Session Management". 
+        // I will leave getMe as is for now to avoid side effects, focusing on the 4 requested verbs.
         const response = await fetch(`${API_URL}/sessions/${session}/me`);
         if (!response.ok) throw new Error('Failed to get session info');
         return response.json();
     },
 
     restartSession: async (session) => {
-        const response = await fetch(`${API_URL}/sessions/${session}/restart`, { method: 'POST' });
+        // Note: WAHA typically uses POST for restart
+        const response = await fetch(`http://localhost:3000/api/sessions/${session}/restart`, { method: 'POST' });
         if (!response.ok) throw new Error('Failed to restart session');
-        return response.json();
+        return true;
     },
 
     // QR Code / Auth

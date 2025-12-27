@@ -8,6 +8,8 @@ import RegisterPage from '../pages/auth/RegisterPage';
 
 import ChatsPage from '../pages/app/ChatsPage';
 import CampaignsPage from '../pages/app/CampaignsPage';
+import CampaignDetailsPage from '../pages/app/CampaignDetailsPage';
+import AgentsPage from '../pages/app/AgentsPage';
 import SettingsPage from '../pages/app/SettingsPage';
 import ProtectedRoute from '../components/ProtectedRoute';
 
@@ -27,6 +29,8 @@ const AppRoutes = () => {
                 <Route element={<DashboardLayout />}>
                     <Route path="chats" element={<ChatsPage />} />
                     <Route path="campaigns" element={<CampaignsPage />} />
+                    <Route path="campaigns/:id" element={<CampaignDetailsPage />} />
+                    <Route path="agents" element={<AgentsPage />} />
                     <Route path="settings" element={<SettingsPage />} />
                     <Route index element={<Navigate to="chats" replace />} />
                 </Route>

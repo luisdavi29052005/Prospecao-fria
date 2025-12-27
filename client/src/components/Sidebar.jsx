@@ -1,188 +1,254 @@
 import React, { useState } from 'react';
-import { MessageSquare, Settings, LogOut, Megaphone } from 'lucide-react';
+import { MessageSquare, Settings, LogOut, Megaphone, Bot, Box } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate, useLocation } from 'react-router-dom';
 
-const SidebarItem = ({ icon: Icon, active, onClick }) => {
+const SidebarItem = ({ icon: Icon, active, onClick, label, danger }) => {
+    const [isHovered, setIsHovered] = useState(false);
+
     return (
         <div
-            onClick={onClick}
+            className="group"
             style={{
-                width: '100%',
+                position: 'relative',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                // marginBottom removed to rely on parent gap for strict control
-                cursor: 'pointer',
-                background: 'transparent'
+                marginBottom: '12px'
             }}
         >
-            <div
+            <button
+                onClick={onClick}
+                onMouseEnter={() => setIsHovered(true)}
+                onMouseLeave={() => setIsHovered(false)}
                 style={{
+                    width: '48px', // w-12
+                    height: '48px', // h-12
+                    borderRadius: '16px', // rounded-2xl
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    opacity: active ? 1 : 0.6,
-                    transition: 'opacity 0.5s cubic-bezier(0.4, 0, 0.2, 1)', // Ultra-smooth fade
-                }}
-                onMouseEnter={(e) => {
-                    if (!active) {
-                        e.currentTarget.style.opacity = 1;
-                    }
-                }}
-                onMouseLeave={(e) => {
-                    if (!active) {
-                        e.currentTarget.style.opacity = 0.6;
-                    }
+                    border: 'none',
+                    cursor: 'pointer',
+                    transition: 'all 300ms ease-in-out', // duration-300 ease-in-out
+
+                    // States
+                    background: active
+                        ? 'rgba(238, 242, 255, 0.5)' // bg-indigo-50/50
+                        : (isHovered && !danger ? 'var(--slate-50)' : 'transparent'),
+
+                    color: danger
+                        ? '#ef4444'
+                        : (active ? 'var(--indigo-600)' : (isHovered ? 'var(--slate-600)' : 'var(--slate-400)')),
+
+                    // Premium Glow Shadow for active state
+                    boxShadow: active
+                        ? '0 0 15px rgba(99, 102, 241, 0.3)' // shadow-[0_0_15px_rgba(99,102,241,0.3)]
+                        : 'none',
+
+                    // Remove default outline
+                    outline: 'none'
                 }}
             >
                 <Icon
-                    size={22}
-                    strokeWidth={1.5}
-                    color={active ? "url(#icon-gradient)" : "#94A3B8"}
-                    style={{
-                        transition: 'stroke 0.5s cubic-bezier(0.4, 0, 0.2, 1)',
-                    }}
+                    size={24}
+                    strokeWidth={1.5} // Elegant thin stroke
                 />
+            </button>
+
+            {/* Tooltip (Right side, z-50, dark bg, white text) */}
+            <div
+                className="group-hover-tooltip"
+                style={{
+                    position: 'absolute',
+                    left: '100%',
+                    marginLeft: '16px',
+                    background: 'var(--slate-900)',
+                    color: 'white',
+                    fontSize: '12px',
+                    fontWeight: 500,
+                    padding: '6px 10px',
+                    borderRadius: '8px',
+                    whiteSpace: 'nowrap',
+                    zIndex: 50,
+                    pointerEvents: 'none',
+                    boxShadow: 'var(--shadow-md)',
+                    opacity: 0,
+                    animation: 'fadeIn 0.2s forwards' // You might need to add @keyframes fadeIn in index.css for this if not present, but for now simple display block from CSS works. 
+                    // To keep it simple with existing CSS hover logic:
+                }}
+            >
+                {label}
+                {/* Tooltip Arrow */}
+                <div style={{
+                    position: 'absolute',
+                    left: '-4px',
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    borderTop: '4px solid transparent',
+                    borderBottom: '4px solid transparent',
+                    borderRight: '4px solid var(--slate-900)'
+                }} />
             </div>
         </div>
     );
 };
 
-const MenuItem = ({ icon: Icon, label, onClick, danger }) => (
-    <div
-        onClick={onClick}
-        style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '10px',
-            padding: '10px 12px',
-            borderRadius: '8px',
-            cursor: 'pointer',
-            fontSize: '13px',
-            fontWeight: 500,
-            color: danger ? 'var(--danger)' : 'var(--text-primary)',
-            transition: 'background 0.2s'
-        }}
-        onMouseEnter={(e) => e.currentTarget.style.background = 'var(--bg-tertiary)'}
-        onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
-    >
-        <Icon size={16} />
-        {label}
-    </div>
-);
-
 const Sidebar = () => {
     const { user, logout } = useAuth();
-    const [showMenu, setShowMenu] = useState(false);
     const navigate = useNavigate();
     const location = useLocation();
+    const [isAvatarHovered, setIsAvatarHovered] = useState(false);
 
-    const isActive = (path) => location.pathname.startsWith(path);
+    const getActive = () => {
+        const path = location.pathname;
+        if (path.startsWith('/app/chats')) return 'chats';
+        if (path.startsWith('/app/campaigns')) return 'campaigns';
+        if (path.startsWith('/app/agents')) return 'agents';
+        if (path.startsWith('/app/settings')) return 'settings';
+        return '';
+    };
+
+    const activeTab = getActive();
 
     return (
         <div style={{
-            width: '60px', // Ultra-Compact
+            width: '80px', // w-20
             height: '100vh',
-            background: '#FFFFFF',
+            minHeight: '100vh',
+            background: 'rgba(255, 255, 255, 0.8)', // bg-white/80
+            backdropFilter: 'blur(12px)', // backdrop-blur-md
+            webkitBackdropFilter: 'blur(12px)',
+            borderRight: '1px solid var(--slate-200)', // delicate border
             display: 'flex',
             flexDirection: 'column',
+            justifyContent: 'space-between',
             alignItems: 'center',
-            padding: '32px 0',
-            position: 'fixed',
-            left: 0,
-            top: 0,
+            padding: '24px 0',
             zIndex: 50,
-            borderRight: '1px solid #E2E8F0', // Visual Divider
-            boxShadow: 'none'
+            flexShrink: 0 // Prevent shrinking in flex container
         }}>
-            {/* Global SVG Definition for Gradient Strokes */}
-            <svg width="0" height="0" style={{ position: 'absolute', visibility: 'hidden' }}>
-                <defs>
-                    <linearGradient id="icon-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                        <stop offset="0%" stopColor="rgb(96, 165, 250)" /> {/* Blue 400 */}
-                        <stop offset="100%" stopColor="rgb(59, 130, 246)" /> {/* Blue 500 */}
-                    </linearGradient>
-                </defs>
-            </svg>
 
-            {/* Nav Items */}
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '24px' }}>
+            {/* Top: Logo (No solid background) */}
+            <div style={{
+                marginBottom: '40px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: 'var(--indigo-600)' // Colored icon directly
+            }}>
+                <Box size={28} strokeWidth={2} />
+            </div>
+
+            {/* Center: Navigation Menu */}
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '8px' }}>
                 <SidebarItem
                     icon={MessageSquare}
-                    active={isActive('/app/chats')}
+                    label="Conversas"
+                    active={activeTab === 'chats'}
                     onClick={() => navigate('/app/chats')}
                 />
                 <SidebarItem
                     icon={Megaphone}
-                    active={isActive('/app/campaigns')}
+                    label="Campanhas"
+                    active={activeTab === 'campaigns'}
                     onClick={() => navigate('/app/campaigns')}
                 />
                 <SidebarItem
-                    icon={Settings}
-                    active={isActive('/app/settings')}
-                    onClick={() => navigate('/app/settings')}
+                    icon={Bot}
+                    label="Agentes IA"
+                    active={activeTab === 'agents'}
+                    onClick={() => navigate('/app/agents')}
                 />
             </div>
 
-            {/* Profile Menu Trigger */}
-            <div style={{ position: 'relative' }}>
-                {showMenu && (
-                    <div style={{
-                        position: 'absolute',
-                        left: '60px',
-                        bottom: '10px',
-                        width: '240px',
-                        background: 'var(--bg-secondary)',
-                        border: '1px solid var(--sidebar-border)',
-                        borderRadius: '16px',
-                        padding: '8px',
-                        boxShadow: 'var(--shadow-float)',
-                        zIndex: 100
-                    }}>
-                        <div style={{ padding: '12px', borderBottom: '1px solid var(--bg-tertiary)', marginBottom: '4px' }}>
-                            <p style={{ color: 'var(--text-primary)', fontSize: '14px', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                {user?.user_metadata?.full_name || 'Usuário'}
-                            </p>
-                            <p style={{ color: 'var(--text-secondary)', fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                {user?.email}
-                            </p>
-                        </div>
-                        <MenuItem icon={Settings} label="Configurações" onClick={() => setShowMenu(false)} />
-                        <MenuItem icon={LogOut} label="Sair da conta" onClick={logout} danger />
-                    </div>
-                )}
+            {/* Bottom: Settings & Avatar */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'center' }}>
+                <SidebarItem
+                    icon={Settings}
+                    label="Configurações"
+                    active={activeTab === 'settings'}
+                    onClick={() => navigate('/app/settings')}
+                />
+
+                <div style={{ height: '1px', width: '32px', background: 'var(--slate-100)', margin: '8px 0' }} />
 
                 <div
-                    onClick={() => setShowMenu(!showMenu)}
+                    className="group"
+                    onClick={logout}
+                    title="Sair da conta"
+                    onMouseEnter={() => setIsAvatarHovered(true)}
+                    onMouseLeave={() => setIsAvatarHovered(false)}
                     style={{
-                        width: '40px',
-                        height: '40px',
-                        borderRadius: '12px',
-                        background: 'var(--bg-tertiary)',
+                        position: 'relative',
                         cursor: 'pointer',
-                        overflow: 'hidden',
-                        border: showMenu ? '2px solid var(--primary)' : '2px solid transparent', // Keep outline for profile context
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        transition: 'all 0.2s',
-                        color: 'var(--text-primary)'
+                        padding: '4px'
                     }}
-                    onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.05)'}
-                    onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
                 >
-                    {user?.user_metadata?.avatar_url ? (
-                        <img
-                            src={user.user_metadata.avatar_url}
-                            alt="Profile"
-                            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                        />
-                    ) : (
-                        <span style={{ fontSize: '14px', fontWeight: 600 }}>
-                            {user?.email?.substring(0, 2).toUpperCase() || 'U'}
-                        </span>
-                    )}
+                    <div style={{
+                        width: '40px', // w-10
+                        height: '40px', // h-10
+                        borderRadius: '50%', // rounded-full
+                        overflow: 'hidden',
+                        // Ring effect: ring-2 ring-white ring-offset-2 ring-offset-slate-100
+                        boxShadow: `0 0 0 2px white, 0 0 0 4px ${isAvatarHovered ? 'var(--indigo-50)' : 'var(--slate-100)'}`,
+                        transition: 'all 300ms ease-in-out',
+                        opacity: isAvatarHovered ? 0.9 : 1
+                    }}>
+                        {user?.user_metadata?.avatar_url ? (
+                            <img
+                                src={user.user_metadata.avatar_url}
+                                alt="Profile"
+                                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                            />
+                        ) : (
+                            <div style={{
+                                width: '100%',
+                                height: '100%',
+                                background: 'var(--slate-200)', // Subtle grey instead of dark
+                                color: 'var(--slate-600)',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                fontSize: '14px',
+                                fontWeight: 600
+                            }}>
+                                {user?.email?.substring(0, 2).toUpperCase() || 'U'}
+                            </div>
+                        )}
+                    </div>
+                    {/* Tooltip for Logout */}
+                    <div
+                        className="group-hover-tooltip"
+                        style={{
+                            position: 'absolute',
+                            left: '100%',
+                            marginLeft: '16px',
+                            top: '50%',
+                            transform: 'translateY(-50%)',
+                            background: 'var(--slate-900)',
+                            color: 'white',
+                            fontSize: '12px',
+                            fontWeight: 500,
+                            padding: '6px 10px',
+                            borderRadius: '8px',
+                            whiteSpace: 'nowrap',
+                            zIndex: 50,
+                            pointerEvents: 'none',
+                            boxShadow: 'var(--shadow-md)'
+                        }}
+                    >
+                        Sair ({user?.email})
+                        <div style={{
+                            position: 'absolute',
+                            left: '-4px',
+                            top: '50%',
+                            transform: 'translateY(-50%)',
+                            borderTop: '4px solid transparent',
+                            borderBottom: '4px solid transparent',
+                            borderRight: '4px solid var(--slate-900)'
+                        }} />
+                    </div>
                 </div>
             </div>
         </div>

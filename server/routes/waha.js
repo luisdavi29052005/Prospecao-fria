@@ -132,7 +132,7 @@ const createWahaRequest = async (method, endpoint, data = null) => {
     }
 
     const url = `${baseUrl}${cleanEndpoint}`;
-    console.log(`🌐 WAHA Request: ${method} ${url}`);
+    console.log(`[WAHA] Request: ${method} ${url}`);
 
     const headers = {
         'Content-Type': 'application/json',
@@ -151,7 +151,16 @@ const createWahaRequest = async (method, endpoint, data = null) => {
         const response = await axios(axiosConfig);
         return response.data;
     } catch (error) {
-        console.error(`WAHA API Error [${method} ${url}]:`, error.response?.data || error.message);
+        // Suppress known "Session starting" errors from polluting logs
+        const isSessionStarting = error.response?.status === 422 && error.response?.data?.status === 'STARTING';
+
+        if (isSessionStarting) {
+            // Silent or minimal log for startup race conditions
+            // console.warn(`[WAHA] Warning: Session STARTING during ${method} ${url}`);
+        } else {
+            console.error(`[WAHA] Error [${method} ${url}]:`, error.response?.data || error.message);
+        }
+
         throw {
             status: error.response?.status || 500,
             data: error.response?.data || { error: error.message },
@@ -350,7 +359,13 @@ router.post('/sessions/:session/presence/:chatId/subscribe', async (req, res) =>
         const data = await createWahaRequest('POST', `/api/${session}/presence/${chatId}/subscribe`);
         res.json(data);
     } catch (error) {
-        console.error(`Error subscribing presence for ${req.params.chatId}:`, error.message);
+        // Handle "Session status is not as expected" gracefully
+        if (error.status === 422 && error.data?.status === 'STARTING') {
+            console.warn(`[WAHA] Presence subscribe skipped: Session STARTING (${req.params.chatId})`);
+            return res.status(422).json(error.data); // Return to client but don't spam server log
+        }
+
+        console.error(`[WAHA] Presence error for ${req.params.chatId}:`, error.message);
         res.status(error.status || 500).json(error.data || { error: error.message });
     }
 });

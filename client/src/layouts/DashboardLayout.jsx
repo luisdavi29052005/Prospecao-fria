@@ -89,12 +89,17 @@ const DashboardLayout = () => {
     };
 
     return (
-        <div style={{ minHeight: '100vh', width: '100%', position: 'relative', background: 'var(--bg-primary)' }}>
+        <div style={{
+            height: '100vh',
+            width: '100vw',
+            display: 'flex',
+            overflow: 'hidden',
+            background: 'var(--slate-50)' // Global bg
+        }}>
             <Sidebar />
             <div style={{
-                marginLeft: '60px', // Adjusted to 60px
-                width: 'calc(100% - 60px)',
-                height: '100vh',
+                flex: 1, // Take remaining width
+                height: '100%',
                 overflow: 'hidden',
                 display: 'flex',
                 flexDirection: 'column'

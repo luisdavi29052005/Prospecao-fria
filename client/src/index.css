@@ -1,69 +1,98 @@
 :root {
-  /* Premium Light Palette */
-  --bg-primary: #f8fafc;
-  /* Slate 50 - "Off-white" Canvas */
-  --bg-secondary: #ffffff;
-  /* White - Cards/Sidebar */
-  --bg-tertiary: #f1f5f9;
-  /* Slate 100 - Hovers/Accents */
+  /* --- Strict Tailwind Palette (SaaS Enterprise 2025) --- */
 
-  /* Glassmorphism & Depth */
-  --glass-panel: rgba(255, 255, 255, 0.7);
-  --glass-border: rgba(255, 255, 255, 0.5);
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.025);
+  /* Slate Scale (Web Foundation) */
+  --slate-50: #f8fafc;
+  /* Global Background */
+  --slate-100: #f1f5f9;
+  /* Hover States */
+  --slate-200: #e2e8f0;
+  /* Borders */
+  --slate-300: #cbd5e1;
+  /* Inputs Border */
+  --slate-400: #94a3b8;
+  /* Icons / Muted Text */
+  --slate-500: #64748b;
+  /* Low Priority Text */
+  --slate-600: #475569;
+  /* Body Text */
+  --slate-700: #334155;
+  /* Labels / High Priority */
+  --slate-800: #1e293b;
+  /* Headings */
+  --slate-900: #0f172a;
+  /* Brand / Heavy Text */
 
-  /* Typography */
-  --text-primary: #0f172a;
-  /* Slate 900 - High Contrast */
-  --text-secondary: #64748b;
-  /* Slate 500 - Subdued */
-  --text-muted: #94a3b8;
-  /* Slate 400 */
-  --text-inverse: #ffffff;
+  /* Indigo Scale (Primary Brand) */
+  --indigo-50: #eef2ff;
+  /* Active Backgrounds */
+  --indigo-100: #e0e7ff;
+  --indigo-500: #6366f1;
+  /* Focus Rings */
+  --indigo-600: #4f46e5;
+  /* Primary Buttons / Links */
+  --indigo-700: #4338ca;
+  /* Active Text / Hover */
 
-  /* Sidebar Specifics (Minimalist White) */
-  --sidebar-bg: #ffffff;
-  --sidebar-text: #64748b;
-  --sidebar-text-active: #0f172a;
-  --sidebar-border: #f1f5f9;
-  /* Almost invisible border */
+  /* Semantic Aliases */
+  --bg-app: var(--slate-50);
+  --bg-card: #ffffff;
+  --bg-hover: var(--slate-50);
 
-  /* Dimensions */
-  --radius-sm: 8px;
-  --radius-md: 20px;
-  /* Requested 20px */
-  --radius-lg: 24px;
-  --radius-xl: 9999px;
+  --text-primary: var(--slate-900);
+  --text-secondary: var(--slate-500);
+  --text-label: var(--slate-700);
 
-  /* Shadows - Ultra Soft & Light */
-  --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
-  --shadow-float: 0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.025);
+  --border-subtle: var(--slate-200);
+  --border-input: var(--slate-300);
 
-  /* Brand Colors - Premium Navy/Indigo */
-  --primary: #4338ca;
-  /* Indigo 700 */
-  --gradient-primary: linear-gradient(135deg, #312e81 0%, #4338ca 100%);
-  /* Deep Navy -> Indigo */
+  --primary: var(--indigo-600);
+  --primary-hover: var(--indigo-700);
+  --focus-ring: var(--indigo-500);
 
-  --accent: #3b82f6;
-  /* Blue 500 */
+  /* Elevation (Tailwind Shadows) */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  --shadow-primary: 0 10px 15px -3px rgba(79, 70, 229, 0.2);
+  /* Colored shadow */
 
-  /* Dimensions */
-  --radius-sm: 8px;
-  --radius-md: 12px;
-  --radius-lg: 24px;
-  --radius-xl: 9999px;
-  /* Pill/Capsule */
+  /* Metrics */
+  --radius-md: 8px;
+  /* Inputs/Buttons */
+  --radius-lg: 12px;
+  /* Cards */
+  --radius-xl: 16px;
+  /* Panels */
 
-  --header-height: 70px;
-
-  /* Transitions */
-  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
-  --transition-smooth: 300ms cubic-bezier(0.16, 1, 0.3, 1);
+  /* Legacy Compat (To prevent breaks) */
+  --bg-primary: var(--bg-app);
+  --bg-secondary: var(--bg-card);
+  --bg-tertiary: var(--slate-100);
+  --text-muted: var(--slate-400);
 
   font-size: 14px;
+}
+
+/* Utilities for Manual Tailwind Support */
+.group {
+  position: relative;
+}
+
+.group-hover-tooltip {
+  display: none;
+}
+
+.group:hover .group-hover-tooltip {
+  display: block;
+}
+
+/* Base Body Style */
+body {
+  background-color: var(--slate-50);
+  margin: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--slate-600);
 }
 
 * {
@@ -256,4 +285,59 @@ p {
 
 .typing-dot:nth-child(3) {
   animation-delay: 0s;
+}
+
+/* Status Change Animation */
+@keyframes fadeInUpShort {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-status-change {
+  animation: fadeInUpShort 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+}
+
+/* Microphone Pulse Animation */
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.8);
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+  }
+
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 6px rgba(239, 68, 68, 0);
+  }
+
+  100% {
+    transform: scale(0.8);
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+  }
+}
+
+.animate-pulse-ring {
+  animation: pulse-ring 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes gentle-bounce {
+
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+.animate-gentle-bounce {
+  animation: gentle-bounce 1s infinite ease-in-out;
 }

@@ -2,9 +2,44 @@ import React, { useState, useEffect } from 'react';
 import { Settings, Save } from 'lucide-react';
 import { supabase } from '../../lib/supabaseClient';
 import { useAuth } from '../../context/AuthContext';
-import Input from '../../components/Input';
-import Button from '../../components/Button';
 import { useToast } from '../../context/ToastContext';
+
+const SettingsInput = ({ label, ...props }) => (
+    <div style={{ marginBottom: '1.5rem' }}>
+        <label style={{
+            display: 'block',
+            fontSize: '13px',
+            fontWeight: 500,
+            color: 'var(--slate-700)',
+            marginBottom: '6px'
+        }}>
+            {label}
+        </label>
+        <input
+            {...props}
+            style={{
+                width: '100%',
+                padding: '10px 12px',
+                fontSize: '14px',
+                lineHeight: '20px',
+                color: 'var(--slate-900)',
+                background: '#FFFFFF',
+                border: '1px solid var(--slate-300)',
+                borderRadius: '8px',
+                outline: 'none',
+                transition: 'all 0.15s ease'
+            }}
+            onFocus={(e) => {
+                e.target.style.borderColor = 'var(--indigo-500)';
+                e.target.style.boxShadow = '0 0 0 3px var(--indigo-100)';
+            }}
+            onBlur={(e) => {
+                e.target.style.borderColor = 'var(--slate-300)';
+                e.target.style.boxShadow = 'none';
+            }}
+        />
+    </div>
+);
 
 const SettingsPage = () => {
     const { user } = useAuth();
@@ -32,9 +67,7 @@ const SettingsPage = () => {
                 .eq('user_id', user.id)
                 .single();
 
-            if (error && error.code !== 'PGRST116') { // PGRST116 is "no rows found"
-                throw error;
-            }
+            if (error && error.code !== 'PGRST116') throw error;
 
             if (data) {
                 setConfig({
@@ -80,95 +113,136 @@ const SettingsPage = () => {
 
     return (
         <div style={{
-            height: '100%',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            background: 'var(--bg-primary)',
-            color: 'var(--text-primary)',
-            padding: '2rem'
+            minHeight: '100%',
+            background: 'var(--slate-50)',
+            padding: '40px 20px'
         }}>
-            <div style={{ width: '100%', maxWidth: '30rem' }}>
-                <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
-                    <div style={{
-                        width: '3rem',
-                        height: '3rem',
-                        borderRadius: '0.75rem',
-                        background: 'var(--bg-card)',
-                        border: '1px solid var(--glass-border)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        margin: '0 auto 1rem auto'
+            <div style={{ maxWidth: '768px', margin: '0 auto' }}>
+
+                {/* Header */}
+                <div style={{ marginBottom: '32px' }}>
+                    <h1 style={{
+                        fontSize: '24px',
+                        fontWeight: 600,
+                        color: 'var(--slate-900)',
+                        marginBottom: '8px'
                     }}>
-                        <Settings size={24} />
-                    </div>
-                    <h2 style={{ fontSize: '1.5rem', marginBottom: '0.5rem' }}>Configurações do Sistema</h2>
-                    <p style={{ color: 'var(--text-secondary)' }}>Configure as integrações externas</p>
+                        Configurações
+                    </h1>
+                    <p style={{ fontSize: '14px', color: 'var(--slate-500)' }}>
+                        Gerencie as integrações e chaves de API do sistema.
+                    </p>
                 </div>
 
-                <form onSubmit={handleSave} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                    <Input
-                        label="Gemini API Key"
-                        name="gemini_key"
-                        placeholder="sk-..."
-                        value={config.gemini_key}
-                        onChange={handleChange}
-                        disabled={loading}
-                        style={{ background: 'var(--bg-card)', borderColor: 'var(--glass-border)' }}
-                    />
+                {/* Card */}
+                <div style={{
+                    background: '#FFFFFF',
+                    borderRadius: '12px',
+                    border: '1px solid var(--slate-200)',
+                    boxShadow: 'var(--shadow-sm)',
+                    overflow: 'hidden'
+                }}>
+                    <div style={{ padding: '24px 32px' }}>
+                        <div style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '12px',
+                            marginBottom: '24px',
+                            paddingBottom: '24px',
+                            borderBottom: '1px solid var(--slate-100)'
+                        }}>
+                            <div style={{
+                                width: '36px', height: '36px',
+                                borderRadius: '8px',
+                                background: 'var(--indigo-50)',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                color: 'var(--indigo-600)'
+                            }}>
+                                <Settings size={20} />
+                            </div>
+                            <div>
+                                <h3 style={{ fontSize: '16px', fontWeight: 600, color: 'var(--slate-800)' }}>
+                                    Integrações
+                                </h3>
+                            </div>
+                        </div>
 
-                    <Input
-                        label="Backend URL"
-                        name="backend_url"
-                        placeholder="https://api.seubackend.com"
-                        value={config.backend_url}
-                        onChange={handleChange}
-                        disabled={loading}
-                        style={{ background: 'var(--bg-card)', borderColor: 'var(--glass-border)' }}
-                    />
+                        <form onSubmit={handleSave}>
+                            <SettingsInput
+                                label="Gemini API Key"
+                                name="gemini_key"
+                                placeholder="sk-..."
+                                value={config.gemini_key}
+                                onChange={handleChange}
+                                disabled={loading}
+                                type="password"
+                            />
 
-                    <Input
-                        label="Apify Token"
-                        name="apify_token"
-                        placeholder="apify_api_..."
-                        value={config.apify_token}
-                        onChange={handleChange}
-                        disabled={loading}
-                        style={{ background: 'var(--bg-card)', borderColor: 'var(--glass-border)' }}
-                    />
+                            <SettingsInput
+                                label="Backend URL"
+                                name="backend_url"
+                                placeholder="https://api.seubackend.com"
+                                value={config.backend_url}
+                                onChange={handleChange}
+                                disabled={loading}
+                            />
 
-                    <Input
-                        label="Waha Base URL"
-                        name="waha_url"
-                        placeholder="http://localhost:3000"
-                        value={config.waha_url}
-                        onChange={handleChange}
-                        disabled={loading}
-                        style={{ background: 'var(--bg-card)', borderColor: 'var(--glass-border)' }}
-                    />
+                            <SettingsInput
+                                label="Apify Token"
+                                name="apify_token"
+                                placeholder="apify_api_..."
+                                value={config.apify_token}
+                                onChange={handleChange}
+                                disabled={loading}
+                                type="password"
+                            />
 
-                    <Button
-                        type="submit"
-                        disabled={loading}
-                        fullWidth // Making it consistent with login
-                        disableShadow={true}
-                        style={{
-                            marginTop: '1rem',
-                            borderRadius: '1.5rem', // Rounded pill button
-                            background: '#27272a', // Dark gray
-                            border: '1px solid #3f3f46',
-                            color: 'white',
-                            padding: '0.875rem',
-                            fontSize: '1rem',
-                            opacity: loading ? 0.7 : 1
-                        }}
-                    >
-                        <Save size={18} style={{ marginRight: '8px' }} />
-                        {loading ? 'Salvando...' : 'Salvar Configurações'}
-                    </Button>
-                </form>
+                            <SettingsInput
+                                label="Waha Base URL"
+                                name="waha_url"
+                                placeholder="http://localhost:3000"
+                                value={config.waha_url}
+                                onChange={handleChange}
+                                disabled={loading}
+                            />
+
+                            <div style={{
+                                marginTop: '32px',
+                                paddingTop: '24px',
+                                borderTop: '1px solid var(--slate-100)',
+                                display: 'flex',
+                                justifySelf: 'flex-end',
+                                flexDirection: 'row-reverse'
+                            }}>
+                                <button
+                                    type="submit"
+                                    disabled={loading}
+                                    style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '8px',
+                                        background: 'var(--indigo-600)',
+                                        color: '#ffffff',
+                                        border: 'none',
+                                        borderRadius: '8px',
+                                        padding: '10px 20px',
+                                        fontSize: '14px',
+                                        fontWeight: 500,
+                                        cursor: loading ? 'not-allowed' : 'pointer',
+                                        opacity: loading ? 0.7 : 1,
+                                        boxShadow: 'var(--shadow-primary)',
+                                        transition: 'background 0.2s'
+                                    }}
+                                    onMouseEnter={(e) => !loading && (e.currentTarget.style.background = 'var(--indigo-700)')}
+                                    onMouseLeave={(e) => !loading && (e.currentTarget.style.background = 'var(--indigo-600)')}
+                                >
+                                    <Save size={16} />
+                                    {loading ? 'Salvando...' : 'Salvar Alterações'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
             </div>
         </div>
     );

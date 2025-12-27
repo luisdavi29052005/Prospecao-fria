@@ -50,7 +50,7 @@ const supabase = createClient(
     supabaseKey
 );
 
-console.log('🔐 Supabase initialized with:', supabaseKey?.substring(0, 20) + '...');
+console.log(`[Supabase] Initialized with key: ${supabaseKey?.substring(0, 10)}...`);
 
 const PORT = process.env.PORT || 8000;
 
@@ -63,6 +63,7 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.set('io', io);
 
 // Routes
+const { generateResponse } = require('./services/geminiService');
 const wahaRoutes = require('./routes/waha');
 app.use('/api/waha', wahaRoutes);
 
@@ -70,16 +71,198 @@ app.get('/', (req, res) => {
     res.send('Backend Prospecção Fria is running');
 });
 
-// Waha Webhook Endpoint
+app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok' });
+});
+
+// Agentes AI Chat Endpoint
+app.post('/api/chat', async (req, res) => {
+    try {
+        const { model, history, systemPrompt } = req.body;
+
+        if (!history || history.length === 0) {
+            return res.status(400).json({ error: 'History (messages) is required' });
+        }
+
+        const responseText = await generateResponse(
+            model || 'gemini-2.0-flash',
+            history,
+            systemPrompt
+        );
+
+        res.json({ response: responseText });
+    } catch (error) {
+        console.error('API Chat Error:', error);
+        res.status(500).json({ error: 'Failed to generate response' });
+    }
+});
+
+const { ApifyClient } = require('apify-client');
+
+app.post('/api/apify/search', async (req, res) => {
+    try {
+        const { searchTerms, location, maxResults = 10, userId } = req.body;
+
+        if (!userId) {
+            return res.status(400).json({ error: 'User ID is required' });
+        }
+
+        // 1. Get Apify Token from DB
+        const { data: settings, error: settingsError } = await supabase
+            .from('system_settings')
+            .select('apify_token')
+            .eq('user_id', userId)
+            .single();
+
+        if (settingsError || !settings?.apify_token) {
+            return res.status(400).json({ error: 'Apify Token not configured in settings' });
+        }
+
+        const client = new ApifyClient({
+            token: settings.apify_token,
+        });
+
+        const limit = parseInt(maxResults);
+
+        // 2. Prepare Input for Google Maps Actor
+        const input = {
+            "searchStringsArray": [searchTerms],
+            "locationQuery": location,
+            "maxCrawledPlaces": limit, // Strict limit
+            "maxCrawledPlacesPerSearch": limit, // Strict limit per search
+            "language": "pt-BR",
+            "searchMatching": "all",
+            "placeMinimumStars": "",
+            "website": "allPlaces",
+            "skipClosedPlaces": true,
+            "scrapePlaceDetailPage": false,
+            "scrapeTableReservationProvider": false,
+            "includeWebResults": false,
+            "scrapeDirectories": false,
+            "maxQuestions": 0,
+            "scrapeContacts": true,
+            "scrapeSocialMediaProfiles": {
+                "facebooks": false,
+                "instagrams": false,
+                "youtubes": false,
+                "tiktoks": false,
+                "twitters": false
+            },
+            "maximumLeadsEnrichmentRecords": 0,
+            "maxReviews": 0,
+            "reviewsSort": "newest",
+            "scrapeReviewsPersonalData": false,
+            "maxImages": 0,
+            "scrapeImageAuthors": false
+        };
+
+        console.log(`[Apify] Starting scrape for "${searchTerms}" in "${location}" (Max: ${limit})...`);
+
+        // 3. START Actor (Async) instead of Call (Sync)
+        const run = await client.actor("nwua9Gu5YrADL7ZDj").start(input);
+        console.log(`[Apify] Run started: ${run.id}`);
+
+        // Return the Run ID immediately
+        res.json({ success: true, runId: run.id });
+
+    } catch (error) {
+        console.error('Apify Start Error:', error);
+        res.status(500).json({ error: error.message || 'Failed to start search' });
+    }
+});
+
+app.get('/api/apify/poll/:runId', async (req, res) => {
+    try {
+        const { runId } = req.params;
+        const userId = req.query.userId; // Pass userId to check token/auth
+
+        // 1. Get Apify Token from DB
+        const { data: settings, error: settingsError } = await supabase
+            .from('system_settings')
+            .select('apify_token')
+            .eq('user_id', userId)
+            .single();
+
+        if (settingsError || !settings?.apify_token) {
+            return res.status(400).json({ error: 'Apify Token not configured' });
+        }
+
+        const client = new ApifyClient({ token: settings.apify_token });
+
+        // 2. Get Run Info
+        const run = await client.run(runId).get();
+        if (!run) {
+            return res.status(404).json({ error: 'Run not found' });
+        }
+
+        // 3. Fetch current items from dataset
+        const { items } = await client.dataset(run.defaultDatasetId).listItems();
+
+        // 4. Normalize
+        const leads = items.map(item => ({
+            name: item.title,
+            phone: item.phone,
+            address: item.address,
+            category: item.categoryName,
+            website: item.website,
+            googleUrl: item.url,
+            raw: item
+        })).filter(l => l.phone);
+
+        res.json({
+            success: true,
+            status: run.status,
+            leads: leads
+        });
+
+    } catch (error) {
+        console.error('Apify Poll Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// --- NEW ENDPOINT: STOP/TAKE CONTROL ---
+app.post('/api/campaigns/stop-lead', async (req, res) => {
+    try {
+        const { leadId, chatId } = req.body;
+
+        if (!leadId) {
+            return res.status(400).json({ error: 'Lead ID is required' });
+        }
+
+        console.log(`[Campaign] 🛑 Manual stop requested for Lead: ${leadId}`);
+
+        // 1. Update DB Status
+        const { data, error } = await supabase
+            .from('campaign_leads')
+            .update({ status: 'manual_intervention' })
+            .eq('id', leadId)
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        // 2. Emit Socket Event (Real-time update)
+        io.emit('lead.update', {
+            leadId: leadId,
+            chatId: chatId, // helpful for frontend matching
+            status: 'manual_intervention',
+            updatedAt: new Date().toISOString()
+        });
+
+        res.json({ success: true, lead: data });
+
+    } catch (error) {
+        console.error('Stop Lead Error:', error);
+        res.status(500).json({ error: 'Failed to stop lead' });
+    }
+});
 app.post('/api/webhook/waha', async (req, res) => {
     try {
         const { event, payload, session } = req.body;
         const sessionName = session || 'default';
 
-        console.log(`🔔 Webhook: ${event} | Session: ${sessionName}`);
-
-        // Log FULL payload for ALL events (debug mode)
-        console.log('📦 Full Payload:', JSON.stringify(payload, null, 2));
+        // console.log('[Webhook] Payload:', JSON.stringify(payload, null, 2)); // Uncomment for debug
 
         if (event === 'message' || event === 'message.any') {
             await handleMessageEvent(payload, sessionName);
@@ -95,8 +278,12 @@ app.post('/api/webhook/waha', async (req, res) => {
             if (event === 'engine.event') {
                 if (payload?.event === 'events.Presence') {
                     status = payload.data?.Unavailable === false ? 'online' : 'offline';
+                } else if (payload?.event === 'events.ChatPresence') {
+                    // Check for Audio Recording
+                    if (payload.data?.State === 'composing' && payload.data?.Media === 'audio') {
+                        status = 'recording';
+                    }
                 }
-                // State is handled above for ChatPresence
             }
 
             // Standardize: 'paused' means they stopped typing but are still online
@@ -113,12 +300,59 @@ app.post('/api/webhook/waha', async (req, res) => {
             const finalId = normalizeJid(resolvedId);
             const originalNormalized = normalizeJid(rawId);
 
-            console.log(`👤 Presence (${event}/${payload?.event || ''}): ${rawId} -> ${finalId} [${status}]`);
+            // Log Throttling for Presence
+            const nowTime = Date.now();
+            const lastLog = lidCache.get(`log_${finalId}`); // Reuse lidCache or create new one? Better create local Map.
+
+            // Note: Since I can't easily add a global variable via replace_file logic cleanly without potential scope issues if I don't see the top,
+            // I will use a simple property on the 'lidCache' or just scoped static-like variable?
+            // Safer: use lidCache to store log metadata as it's already persistent in memory.
+            // Key: `log_presence_${finalId}` -> { status, time }
+
+            const logKey = `log_presence_${finalId}`;
+            const lastPresence = lidCache.get(logKey);
+
+            if (!lastPresence || lastPresence.status !== status || (nowTime - lastPresence.time > 10000)) {
+                console.log(`[Presence] ${finalId} -> ${status}`);
+                lidCache.set(logKey, { status, time: nowTime });
+            }
+
+            // PERSIST LAST SEEN
+            let currentLastSeen = null;
+            if (status === 'offline' || status !== 'online') {
+                currentLastSeen = new Date().toISOString();
+                // Determine user_id (using first found for now)
+                const { data: settings } = await supabase
+                    .from('system_settings')
+                    .select('user_id')
+                    .limit(1)
+                    .single();
+
+                if (settings?.user_id) {
+                    // Update last_seen in chats table
+                    await supabase
+                        .from('chats')
+                        .update({
+                            last_seen: currentLastSeen,
+                        })
+                        .eq('chat_id', finalId)
+                        .eq('user_id', settings.user_id);
+                }
+            }
+
+            // --- TRIGGER CAMPAIGN SNIPER ---
+            // If they are online, check if any campaign is waiting for them
+            if (status === 'online' || status === 'composing') {
+                handlePresenceTrigger(finalId, status).catch(err => console.error('[Sniper] Trigger Error:', err));
+            }
+            // -------------------------------
+
             io.emit('presence.update', {
                 session: sessionName,
                 chatId: finalId,
                 originalId: originalNormalized,
-                status: status
+                status: status,
+                lastSeen: currentLastSeen
             });
         }
 
@@ -166,7 +400,7 @@ async function handleMessageEvent(payload, sessionName) {
             chatId = infoChat;
         }
 
-        console.log('📤 Processing SENT message. Resolved ChatID:', chatId);
+        console.log('[System] Processing SENT message');
     }
 
     // Fallback: If still null or using c.us, try Info.Chat for any message type
@@ -174,8 +408,11 @@ async function handleMessageEvent(payload, sessionName) {
         chatId = _data.Info.Chat;
     }
 
+    let rawLid = null;
+
     // Fix: If chatId is an LID (Linked Device ID) and we haven't resolved it yet
     if (chatId?.includes('@lid')) {
+        rawLid = chatId;
         const senderAlt = _data?.Info?.SenderAlt; // e.g., "5518998232124:46@s.whatsapp.net"
         if (senderAlt) {
             console.log('🔄 Converting LID to JID (SenderAlt):', chatId, '->', senderAlt);
@@ -185,7 +422,7 @@ async function handleMessageEvent(payload, sessionName) {
         } else if (lidCache.has(chatId)) {
             // Fix: Use cached JID if available
             const cachedJid = lidCache.get(chatId);
-            console.log('🔄 Using cached JID for LID:', chatId, '->', cachedJid);
+            console.log(`[LID] Using cached JID: ${cachedJid}`);
             chatId = cachedJid;
         } else if (_data?.id?.remote) {
             // Fallback to remote if SenderAlt is missing
@@ -200,7 +437,7 @@ async function handleMessageEvent(payload, sessionName) {
         // Normalize domain: @c.us -> @s.whatsapp.net
         chatId = chatId.replace('@c.us', '@s.whatsapp.net');
     } else {
-        console.log('⚠️ Could not resolve Chat ID. Skipping message processing.');
+        console.log('[System] Could not resolve Chat ID. Skipping.');
         return;
     }
 
@@ -215,7 +452,7 @@ async function handleMessageEvent(payload, sessionName) {
 
     const isGroup = chatId?.includes('@g.us') || false;
 
-    console.log(`📩 ${isFromMe ? '➡️ Enviada' : '⬅️ Recebida'}: "${body?.substring(0, 50)}..." | De: ${pushName} (${phone})`);
+    console.log(`[Message] ${isFromMe ? 'OUT' : 'IN'} | ${pushName || 'Unknown'} (${phone || 'No Number'}): ${(body || '').substring(0, 50)}...`);
 
     // Get user_id from system_settings (first user for now)
     // In production, you'd match by session/WAHA config
@@ -226,11 +463,7 @@ async function handleMessageEvent(payload, sessionName) {
         .single();
 
     if (settingsError) {
-        console.log('⚠️ Settings query error:', settingsError.message);
-    }
-
-    if (!settings?.user_id) {
-        console.log('⚠️ No user found in settings, data:', settings);
+        console.log('[System] No user found in settings');
         return;
     }
 
@@ -243,6 +476,7 @@ async function handleMessageEvent(payload, sessionName) {
             user_id: userId,
             session_name: sessionName,
             chat_id: chatId,
+            lid: rawLid, // Save LID mapping
             name: pushName,
             phone: phone,
             is_group: isGroup,
@@ -256,11 +490,11 @@ async function handleMessageEvent(payload, sessionName) {
         .single();
 
     if (chatError) {
-        console.error('Chat upsert error:', chatError.message);
+        console.error('[System] Chat upsert error:', chatError.message);
         return;
     }
 
-    console.log(`💬 Chat: ${chat.id} | ${chat.name || chat.phone}`);
+    // console.log(`[Chat] ${chat.id}`);
 
     // Verify if message already exists (Idempotency)
     const { data: existingMessage } = await supabase
@@ -270,7 +504,7 @@ async function handleMessageEvent(payload, sessionName) {
         .single();
 
     if (existingMessage) {
-        console.log(`⚠️ Message ${messageId} already exists. Skipping.`);
+        console.log(`[Message] Already exists: ${messageId}`);
         // Emit via socket anyway to ensure UI is up to date (e.g. status change)
         io.emit('message', {
             chatId: chat.id,
@@ -310,11 +544,11 @@ async function handleMessageEvent(payload, sessionName) {
         messageType = 'text';
     }
 
-    console.log(`🔍 Type Inference: Raw=${type}, Inferred=${messageType}, HasMedia=${payload.hasMedia}`);
+    // console.log(`[Type] Raw=${type}, Inferred=${messageType}`);
 
     if (payload.hasMedia || messageType === 'image' || messageType === 'ptt' || messageType === 'audio' || messageType === 'video' || messageType === 'document') {
         try {
-            console.log(`📥 Downloading media for message ${messageId}...`);
+            console.log(`[Media] Downloading for message ${messageId}...`);
             const wahaUrl = process.env.WAHA_API_URL || 'http://localhost:3000';
 
             // Prioritize URL from payload if available (often resolves ID mismatches)
@@ -328,7 +562,7 @@ async function handleMessageEvent(payload, sessionName) {
                 downloadUrl = `${wahaUrl}${downloadUrl}`;
             }
 
-            console.log(`🔗 Using media URL: ${downloadUrl}`);
+            // console.log(`[Media] URL: ${downloadUrl}`);
 
             // Download media
             const response = await axios.get(downloadUrl, {
@@ -370,13 +604,13 @@ async function handleMessageEvent(payload, sessionName) {
                         .getPublicUrl(storagePath);
 
                     mediaUrl = publicUrlData.publicUrl;
-                    console.log(`✅ Media uploaded: ${mediaUrl}`);
+                    console.log(`[Media] Uploaded: ${mediaUrl}`);
                 }
             } else {
                 console.warn(`⚠️ Failed to download media. Status: ${response.status}`);
             }
         } catch (err) {
-            console.error('❌ Failed to process media:', err.message);
+            console.error('[Media] Processing failed:', err.message);
         }
     }
 
@@ -397,20 +631,25 @@ async function handleMessageEvent(payload, sessionName) {
         .single();
 
     if (msgError) {
-        console.error('Message insert error:', msgError.message);
+        if (msgError.code === '23505') { // Unique violation
+            console.log(`[Message] Already processed (idempotency): ${messageId}`);
+        } else {
+            console.error('[Message] Insert error:', msgError.message);
+        }
         return;
     }
 
-    console.log(`💾 Message saved: ${message.id}`);
+    console.log(`[Message] Saved: ${message.id}`);
 
     // Emit to connected clients via Socket.io
     io.emit('message', {
         chatId: chat.id,
+        chatJid: chat.chat_id, // Explicit JID for matching
         sessionName,
         message: {
             id: message.id,
             message_id: message.message_id,
-            body,
+            body: body || (mediaUrl ? (messageType === 'ptt' ? 'Áudio' : 'Mídia') : ''),
             fromMe: isFromMe,
             timestamp: message.timestamp,
             type: messageType,
@@ -418,6 +657,7 @@ async function handleMessageEvent(payload, sessionName) {
         },
         chat: {
             id: chat.id,
+            chat_id: chat.chat_id,
             name: chat.name,
             phone: chat.phone,
             isGroup: chat.is_group
@@ -425,18 +665,12 @@ async function handleMessageEvent(payload, sessionName) {
     });
 }
 
-// Socket.io connection handling
-io.on('connection', (socket) => {
-    console.log('🔌 Client connected:', socket.id);
-
-    socket.on('disconnect', () => {
-        console.log('🔌 Client disconnected:', socket.id);
-    });
-});
-
 // Start Server
+const { startRunner, handlePresenceTrigger } = require('./services/campaignRunner');
+startRunner();
+
 server.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`[Server] Running on http://localhost:${PORT}`);
 });
 
 // Export io for use in routes

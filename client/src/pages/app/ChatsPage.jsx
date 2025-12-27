@@ -10,8 +10,10 @@ import {
 } from 'lucide-react';
 import ChatsSkeleton from '../../components/skeletons/ChatsSkeleton';
 import MinimalAudioPlayer from '../../components/MinimalAudioPlayer';
+import Toast from '../../components/Toast';
 import { supabase } from '../../lib/supabaseClient';
 import { wahaService } from '../../services/waha';
+import { setChatCache, getChatCache, setMessageCache, getMessageCache } from '../../lib/dataCache';
 
 // ----------------------------------------------------------------------------
 // UTILS
@@ -43,6 +45,26 @@ const getDateLabel = (date) => {
     }
 };
 
+const formatLastSeen = (dateString) => {
+    if (!dateString) return 'Visto por último recentemente';
+    const d = new Date(dateString);
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const msgDate = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+
+    const timeStr = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+    if (msgDate.getTime() === today.getTime()) {
+        return `Visto por último hoje às ${timeStr}`;
+    } else if (msgDate.getTime() === yesterday.getTime()) {
+        return `Visto por último ontem às ${timeStr}`;
+    } else {
+        return `Visto por último em ${d.toLocaleDateString('pt-BR')} às ${timeStr}`;
+    }
+};
+
 const ChatsPage = () => {
     const { user, logout } = useAuth();
     const fileInputRef = useRef(null);
@@ -60,16 +82,85 @@ const ChatsPage = () => {
         refreshSessions
     } = useOutletContext() || {};
 
-    const [isLoadingData, setIsLoadingData] = useState(true);
-    const [leads, setLeads] = useState([]);
+    const activeSession = parentActiveSession;
+
+    // Initialize from cache
+    const cachedLeads = activeSession ? getChatCache(activeSession.name) : null;
+    const [isLoadingData, setIsLoadingData] = useState(!cachedLeads);
+    const [leads, setLeads] = useState(cachedLeads || []);
     const [hasSession, setHasSession] = useState(false);
     const [isCreatingSession, setIsCreatingSession] = useState(false);
     const [isActionLoading, setIsActionLoading] = useState(false);
     const [qrCode, setQrCode] = useState(null);
-    const [selectedLead, setSelectedLead] = useState(null);
+    const [selectedLead, setSelectedLead] = useState(() => {
+        if (cachedLeads && cachedLeads.length > 0) {
+            const lastId = localStorage.getItem('lastSelectedChatId');
+            if (lastId) {
+                return cachedLeads.find(l => l.id === lastId) || null;
+            }
+        }
+        return null;
+    });
+
+    // Context Menu State
+    const [contextMenu, setContextMenu] = useState({ show: false, x: 0, y: 0, chatId: null });
+
+    // Toast Notification State
+    const [toast, setToast] = useState({ show: false, message: '', type: 'success' });
+    const showToast = (message, type = 'success') => {
+        setToast({ show: true, message, type });
+        setTimeout(() => setToast(prev => ({ ...prev, show: false })), 3000);
+    };
+
+    // Delete Chat Handler
+    const handleDeleteChat = async () => {
+        if (!contextMenu.chatId) return;
+
+        const chatIdToDelete = contextMenu.chatId;
+        const previousLeads = [...leads];
+
+        // Optimistic UI update
+        setLeads(prev => prev.filter(l => l.id !== chatIdToDelete));
+        if (selectedLead?.id === chatIdToDelete) setSelectedLead(null);
+        setContextMenu({ show: false, x: 0, y: 0, chatId: null });
+
+        try {
+            const { error } = await supabase
+                .from('chats')
+                .delete()
+                .eq('id', chatIdToDelete);
+
+            if (error) throw error;
+            console.log('✅ Chat deleted successfully');
+        } catch (err) {
+            console.error('Error deleting chat:', err);
+            // Revert on error
+            setLeads(previousLeads);
+            alert('Erro ao excluir chat.');
+        }
+    };
+
+    // Close context menu on click elsewhere
+    useEffect(() => {
+        const handleClick = () => setContextMenu({ show: false, x: 0, y: 0, chatId: null });
+        window.addEventListener('click', handleClick);
+        return () => window.removeEventListener('click', handleClick);
+    }, []);
+    // Auto-refresh while STARTING to catch status change to WORKING
+    useEffect(() => {
+        let interval;
+        if (activeSession && (activeSession.status === 'STARTING')) {
+            interval = setInterval(() => {
+                refreshSessions();
+            }, 2000); // Check every 2s
+        }
+        return () => clearInterval(interval);
+    }, [activeSession?.status, refreshSessions]);
+
     const [sessionName, setSessionName] = useState('');
     const [isCreatingNew, setIsCreatingNew] = useState(false);
     const [messages, setMessages] = useState([]);
+    const [isLoadingMessages, setIsLoadingMessages] = useState(false);
     const [inputValue, setInputValue] = useState('');
     const [presence, setPresence] = useState({}); // { chatId: 'composing' | 'recording' | 'available' }
     const [showChatMenu, setShowChatMenu] = useState(false);
@@ -87,9 +178,15 @@ const ChatsPage = () => {
 
 
 
-    // Use parent session state
-    const activeSession = parentActiveSession;
+
     const sessions = parentSessions; // Can be null (loading)
+
+    // Save selected lead to localstorage
+    useEffect(() => {
+        if (selectedLead) {
+            localStorage.setItem('lastSelectedChatId', selectedLead.id);
+        }
+    }, [selectedLead]);
 
 
 
@@ -342,14 +439,24 @@ const ChatsPage = () => {
 
     // Derived states
     const sessionStatus = activeSession?.status;
-    const isConnected = sessionStatus === 'WORKING';
-    const isScanning = sessionStatus === 'SCAN_QR_CODE';
+
     const isStarting = sessionStatus === 'STARTING';
+    const isScanning = sessionStatus === 'SCAN_QR_CODE';
     const isStopped = sessionStatus === 'STOPPED';
     const isFailed = sessionStatus === 'FAILED';
+    const isWorking = sessionStatus === 'WORKING';
+
+    // UI LOGIC:
+    // If we have an active session, show the Chat UI (Step 3) for ALL states
+    // EXCEPT when we explicitly need to scan a QR code (Step 2).
+    // The Status Banner will handle warnings for STOPPED/FAILED/STARTING.
+    const isConnected = activeSession && !isScanning && !isCreatingNew;
+
     const needsReconnect = hasSession && (isStopped || isFailed) && !isCreatingNew;
     const isNewUser = !hasSession || isCreatingNew;
-    const isConnecting = isStarting || isScanning;
+
+    // Only show "Connecting" screen if we are strictly scanning QR
+    const isConnecting = isScanning;
 
     // Steps based on user state
     const getSteps = () => {
@@ -389,6 +496,16 @@ const ChatsPage = () => {
                 setIsLoadingData(false);
                 return;
             }
+
+            // Check cache for this specific session on switch
+            const cached = getChatCache(activeSession.name);
+            if (cached) {
+                setLeads(cached);
+                setIsLoadingData(false);
+            } else {
+                setIsLoadingData(true);
+            }
+
             try {
                 const { data, error } = await supabase
                     .from('chats')
@@ -399,7 +516,16 @@ const ChatsPage = () => {
                 if (error) {
                     console.log('Error loading chats:', error.message);
                 }
-                setLeads(data || []);
+                const result = data || [];
+                setLeads(result);
+                setChatCache(activeSession.name, result); // Cache the result
+
+                // Restore selection if exists
+                const lastId = localStorage.getItem('lastSelectedChatId');
+                if (lastId && !selectedLead) {
+                    const restored = result.find(l => l.id === lastId);
+                    if (restored) setSelectedLead(restored);
+                }
             } catch (e) {
                 console.log('Chats not available');
             } finally {
@@ -407,36 +533,65 @@ const ChatsPage = () => {
             }
         };
         loadChats();
+    }, [activeSession?.name]); // Run when session changes
 
-        // 🤖 Auto-Subscribe Presence for ALL loaded chats
-        // This ensures status (Online/Typing) works for automations without clicking
-        const subscribeAll = () => {
-            if (activeSession && leads?.length > 0) {
-                console.log(`💓 Presence Sync: Subscribing ${leads.length} contacts...`);
-                leads.forEach(lead => {
-                    const targetId = lead.chat_id || lead.id;
-                    if (targetId) wahaService.subscribePresence(activeSession.name, targetId);
-                });
+    // 🤖 Auto-Subscribe Presence for ALL loaded chats
+    useEffect(() => {
+        const subscribeAll = async () => {
+            // Only subscribe if session is actually working
+            if (activeSession && activeSession.status === 'WORKING' && leads?.length > 0) {
+                // console.log(`💓 Presence Sync: Subscribing ${leads.length} contacts...`);
+
+                // Batch processing to prevent network storm (1000 contacts support)
+                const CHUNK_SIZE = 20;
+                const DELAY_MS = 500;
+                const chunks = [];
+
+                // Create chunks
+                for (let i = 0; i < leads.length; i += CHUNK_SIZE) {
+                    chunks.push(leads.slice(i, i + CHUNK_SIZE));
+                }
+
+                // Process chunks sequentially
+                for (const chunk of chunks) {
+                    // Fire chunk in parallel
+                    await Promise.all(chunk.map(lead => {
+                        const targetId = lead.chat_id || lead.id;
+                        if (targetId) return wahaService.subscribePresence(activeSession.name, targetId).catch(() => { });
+                        return Promise.resolve();
+                    }));
+
+                    // Wait before next chunk to be gentle on server
+                    await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+                }
             }
         };
 
         // Re-subscribe heartbeat - keeps presence connections alive in WAHA
-        const presenceInterval = setInterval(subscribeAll, 30000);
+        // Increased interval to 60s for stability with large lists
+        const presenceInterval = setInterval(subscribeAll, 60000);
 
         // Initial subscription
         subscribeAll();
 
-        // Real-time Socket Listeners
+        return () => clearInterval(presenceInterval);
+    }, [activeSession?.name, leads?.length]);
+
+    // Real-time Socket Listeners (Separated for stability)
+    useEffect(() => {
         const socket = wahaService.socket;
 
         const handlePresenceUpdate = (payload) => {
-            let { chatId, originalId, status } = payload;
+            let { chatId, originalId, status, lastSeen } = payload;
             if (status) {
                 // Standardize Status
                 let stdStatus = status.toLowerCase();
-                if (stdStatus === 'composing' || stdStatus === 'typing') stdStatus = 'typing';
-                if (stdStatus === 'available' || stdStatus === 'online' || stdStatus === 'paused') stdStatus = 'online';
-                if (stdStatus === 'unavailable' || stdStatus === 'offline') stdStatus = 'offline';
+
+                // Explicitly check for recording first
+                if (stdStatus === 'recording') stdStatus = 'recording';
+                else if (stdStatus === 'composing' || stdStatus === 'typing') stdStatus = 'typing';
+                else if (stdStatus === 'available' || stdStatus === 'online' || stdStatus === 'paused') stdStatus = 'online';
+                else if (stdStatus === 'unavailable' || stdStatus === 'offline') stdStatus = 'offline';
 
                 const normChatId = normalizeJid(chatId);
                 const normOriginalId = normalizeJid(originalId);
@@ -455,55 +610,142 @@ const ChatsPage = () => {
                     }
                     return changed ? next : prev;
                 });
+
+                // Update Realtime Last Seen locally
+                if (lastSeen) {
+                    setLeads(prev => prev.map(l => {
+                        const lJid = normalizeJid(l.chat_id || l.id);
+                        if (lJid === normChatId || lJid === normOriginalId) {
+                            return { ...l, last_seen: lastSeen };
+                        }
+                        return l;
+                    }));
+
+                    // Update selected lead if active
+                    setSelectedLead(prev => {
+                        if (prev) {
+                            const pJid = normalizeJid(prev.chat_id || prev.id);
+                            if (pJid === normChatId || pJid === normOriginalId) {
+                                return { ...prev, last_seen: lastSeen };
+                            }
+                        }
+                        return prev;
+                    });
+                }
             }
         };
 
         const handleChatUpdate = (payload) => {
-            console.log('🔄 Chat List Update:', payload);
-            const chatId = payload.chatId || payload.chat?.id || payload.message?.chatId;
+            console.log('⚡ Chat Update (Socket):', payload);
+
+            // Prefer explicit chatJid from backend (WA ID) for matching
+            // Fallback to chatId (UUID) or other variations
+            const targetJid = payload.chatJid || payload.chat?.chat_id;
+            const targetUuid = payload.chatId || payload.chat?.id;
+
             const msg = payload.message || payload;
-            const body = msg.body || (['image', 'video', 'ptt', 'audio'].includes(msg.type) ? 'Mídia' : '');
+
+            // Allow 'text' type fallback if body exists
+            const type = msg.type || 'text';
+            const body = msg.body || (['image', 'video', 'ptt', 'audio'].includes(type) ? (type === 'ptt' || type === 'audio' ? 'Áudio' : 'Mídia') : msg.body);
+
             const timestamp = msg.timestamp || new Date().toISOString();
 
-            if (!chatId) return;
+            if (!targetJid && !targetUuid) return;
 
             setLeads(prevLeads => {
-                const existingIndex = prevLeads.findIndex(l => l.id === chatId || l.chat_id === chatId);
+                const normTargetJid = normalizeJid(targetJid);
+
+                const existingIndex = prevLeads.findIndex(l => {
+                    // Match by WA ID (Preferred)
+                    if (targetJid && normalizeJid(l.chat_id) === normTargetJid) return true;
+                    // Match by UUID 
+                    if (targetUuid && l.id === targetUuid) return true;
+                    // Fallback to legacy ID check
+                    if (normalizeJid(l.id) === normTargetJid) return true;
+                    return false;
+                });
+
                 if (existingIndex > -1) {
                     const updatedLeads = [...prevLeads];
                     const chat = updatedLeads[existingIndex];
+
+                    // Remove from current position
                     updatedLeads.splice(existingIndex, 1);
+
+                    // Add to top with updated info
                     updatedLeads.unshift({
                         ...chat,
-                        last_message: body,
+                        last_message: body || 'Nova mensagem', // Force a string if empty
                         last_message_at: timestamp
                     });
                     return updatedLeads;
                 } else {
-                    loadChats(); // New chat found
-                    return prevLeads;
+                    // NEW CHAT HANDLING
+                    // Construct a new lead object matching the DB shape
+                    const newChat = {
+                        id: targetUuid || payload.chat?.id, // UUID
+                        chat_id: targetJid || payload.chat?.chat_id, // WA ID
+                        name: payload.chat?.name || payload.chat?.phone || 'Novo Contato',
+                        phone: payload.chat?.phone,
+                        is_group: payload.chat?.isGroup,
+                        last_message: body || 'Nova mensagem',
+                        last_message_at: timestamp,
+                        session_name: activeSession?.name,
+                        unread_count: 1 // Assume 1 unread since it's new
+                    };
+
+                    console.log('✨ New chat detected via socket:', newChat);
+
+                    // Add to top of list
+                    return [newChat, ...prevLeads];
                 }
+            });
+        };
+
+        // NEW: Handle Lead Status Update (for AI Control)
+        const handleLeadUpdate = (payload) => {
+            console.log('🤖 Lead Status Update:', payload);
+            const { leadId, status, chatId } = payload;
+
+            setLeads(prev => prev.map(lead => {
+                // Try to match by lead ID (campaign_leads id) or chat ID
+                // Note: We need to ensure we map campaign_leads.id to a property on the lead object
+                if (lead.campaign_lead_id === leadId || lead.id === chatId) {
+                    return { ...lead, campaign_status: status };
+                }
+                return lead;
+            }));
+
+            // Update selected lead if it matches
+            setSelectedLead(prev => {
+                if (!prev) return prev;
+                if (prev.campaign_lead_id === leadId || prev.id === chatId) {
+                    return { ...prev, campaign_status: status };
+                }
+                return prev;
             });
         };
 
         if (socket && activeSession) {
             socket.on('message', handleChatUpdate);
             socket.on('presence.update', handlePresenceUpdate);
-            socket.on('connect', () => {
-                console.log('🟢 Socket Reconnected: Re-subscribing presence...');
-                subscribeAll();
-            });
-        }
+            socket.on('lead.update', handleLeadUpdate); // Register listener
 
-        return () => {
-            clearInterval(presenceInterval);
-            if (socket) {
+            // Re-connect logic
+            const onConnect = () => {
+                console.log('🟢 Socket Reconnected');
+            };
+            socket.on('connect', onConnect);
+
+            return () => {
                 socket.off('message', handleChatUpdate);
                 socket.off('presence.update', handlePresenceUpdate);
-                socket.off('connect');
-            }
-        };
-    }, [activeSession?.name, leads?.length]); // Run when session changes OR lead count changes
+                socket.off('lead.update', handleLeadUpdate);
+                socket.off('connect', onConnect);
+            };
+        }
+    }, [activeSession?.name]); // Only re-run if session changes
 
     // Fetch messages for selected chat
     useEffect(() => {
@@ -517,13 +759,29 @@ const ChatsPage = () => {
         }
 
         const fetchMessages = async () => {
+            const currentChatId = selectedLead.id;
+
+            // Check cache first
+            const cachedMsgs = getMessageCache(currentChatId);
+            if (cachedMsgs) {
+                setMessages(cachedMsgs);
+                setIsLoadingMessages(false);
+            } else {
+                setMessages([]); // Clear previous messages if no cache
+                setIsLoadingMessages(true);
+            }
+
             const { data, error } = await supabase
                 .from('messages')
                 .select('*')
                 .eq('chat_id', selectedLead.id)
                 .order('timestamp', { ascending: true });
 
-            if (data) setMessages(data);
+            if (data) {
+                setMessages(data);
+                setMessageCache(selectedLead.id, data);
+            }
+            setIsLoadingMessages(false);
         };
 
         fetchMessages();
@@ -576,7 +834,7 @@ const ChatsPage = () => {
         };
 
         if (socket) {
-            socket.off('message'); // Remove any existing listeners to be safe
+            // socket.off('message') REMOVED: This was killing the sidebar listener!
             socket.on('message', handleNewMessage);
             socket.on('connect', () => console.log('🟢 Socket connected:', socket.id));
             socket.on('disconnect', () => console.log('🔴 Socket disconnected'));
@@ -610,32 +868,91 @@ const ChatsPage = () => {
         return () => clearInterval(interval);
     }, [isScanning, activeSession?.name]);
 
-    // Refresh session status
+    // Load Chats (Updated to include Campaign/Lead Status)
     useEffect(() => {
-        if (!hasSession) return;
+        const loadChats = async () => {
+            if (!activeSession) {
+                setIsLoadingData(false);
+                return;
+            }
 
-        const refresh = async () => {
+            // Check cache for this specific session on switch
+            const cached = getChatCache(activeSession.name);
+            if (cached) {
+                setLeads(cached);
+                setIsLoadingData(false);
+            } else {
+                setIsLoadingData(true);
+            }
+
             try {
-                let data = await wahaService.getSessions();
-                // Just trust getSessions result
-                if (data?.length > 0) {
-                    setSessions(data);
-                    const updated = data.find(s => s.name === activeSession?.name);
-                    if (updated) setActiveSession(updated);
-                }
-            } catch (e) { }
-        };
+                // Fetch chats with JOIN enabled on campaign_leads to get status
+                // Approach: Fetch chats, then fetch active leads for this session/user, then merge.
 
-        const interval = setInterval(refresh, 5000);
-        return () => clearInterval(interval);
-    }, [hasSession, activeSession?.name]);
+                const { data: chatsData, error } = await supabase
+                    .from('chats')
+                    .select('*')
+                    .eq('session_name', activeSession.name)
+                    .order('last_message_at', { ascending: false });
+
+                if (error) {
+                    console.log('Error loading chats:', error.message);
+                }
+
+                let result = chatsData || [];
+
+                // Fetch Active Leads Statuses
+                const { data: leadsData } = await supabase
+                    .from('campaign_leads')
+                    .select('id, phone, status, campaign_id')
+                    .neq('status', 'converted')
+                    .neq('status', 'lost')
+                    .neq('status', 'junk');
+
+                if (leadsData && leadsData.length > 0) {
+                    // MERGE Logic
+                    result = result.map(chat => {
+                        const chatPhone = chat.phone ? chat.phone.replace(/\D/g, '') : '';
+                        const matchingLead = leadsData.find(l => {
+                            const leadPhone = l.phone.replace(/\D/g, '');
+                            return leadPhone.endsWith(chatPhone.slice(-8));
+                        });
+
+                        if (matchingLead) {
+                            return {
+                                ...chat,
+                                campaign_status: matchingLead.status,
+                                campaign_lead_id: matchingLead.id
+                            };
+                        }
+                        return chat;
+                    });
+                }
+
+                setLeads(result);
+                setChatCache(activeSession.name, result);
+
+                // Restore selection if exists
+                const lastId = localStorage.getItem('lastSelectedChatId');
+                if (lastId && !selectedLead) {
+                    const restored = result.find(l => l.id === lastId);
+                    if (restored) setSelectedLead(restored);
+                }
+            } catch (e) {
+                console.log('Chats not available');
+            } finally {
+                setIsLoadingData(false);
+            }
+        };
+        loadChats();
+    }, [activeSession?.name]);
 
     // Auto-scroll to bottom whenever messages update OR presence changes (if typing bubble appears)
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages, presence]);
 
-    if (sessions === null) {
+    if (sessions === null || (sessions.length > 0 && !activeSession)) {
         return <ChatsSkeleton />;
     }
 
@@ -682,6 +999,40 @@ const ChatsPage = () => {
             setIsActionLoading(false);
         }
     };
+
+    const handleTakeControl = async () => {
+        if (!selectedLead || !selectedLead.campaign_lead_id) return;
+
+        try {
+            // Optimistic Update
+            const updatedLead = { ...selectedLead, campaign_status: 'manual_intervention' };
+            setSelectedLead(updatedLead);
+            setLeads(prev => prev.map(l => l.id === selectedLead.id ? updatedLead : l));
+
+            const response = await fetch('http://localhost:3000/api/campaigns/stop-lead', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    leadId: selectedLead.campaign_lead_id,
+                    chatId: selectedLead.id
+                })
+            });
+
+            const data = await response.json();
+            if (data.success) {
+                console.log('✅ Lead stopped successfully');
+            } else {
+                throw new Error(data.error);
+            }
+        } catch (error) {
+            console.error('Failed to take control:', error);
+            alert('Erro ao assumir controle. Tente novamente.');
+        }
+    };
+
+    // Is AI Active?
+    const isAIActive = selectedLead?.campaign_status &&
+        ['pending', 'contacted', 'responded', 'negotiating', 'qualified'].includes(selectedLead.campaign_status);
 
     if (isLoadingData) {
         return <ChatsSkeleton />;
@@ -768,8 +1119,9 @@ const ChatsPage = () => {
                     }}>
                         <h2 style={{
                             fontSize: '18px',
-                            fontWeight: 700,
-                            color: '#1E293B',
+                            fontWeight: 600,
+                            color: '#0F172A',
+                            letterSpacing: '-0.02em',
                             margin: 0
                         }}>
                             Conversas
@@ -919,12 +1271,58 @@ const ChatsPage = () => {
                                 {isSessionMenuOpen && (
                                     <div style={{
                                         position: 'absolute', top: '100%', right: 0, marginTop: '4px',
-                                        width: '160px', background: '#fff', borderRadius: '8px',
+                                        width: '180px', background: '#fff', borderRadius: '8px',
                                         boxShadow: '0 4px 12px rgba(0,0,0,0.1)', padding: '4px', zIndex: 100, border: '1px solid #f1f5f9'
                                     }}>
-                                        <button onClick={() => { localStorage.setItem('createNewSession', 'true'); window.location.reload(); }} style={{ padding: '8px', width: '100%', textAlign: 'left', background: 'transparent', border: 'none', fontSize: '13px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', color: '#1E293B' }}><Plus size={14} /> Nova Sessão</button>
+                                        <button onClick={async () => {
+                                            if (!activeSession) return;
+                                            setActiveSession({ ...activeSession, status: 'STARTING' });
+                                            setIsSessionMenuOpen(false);
+                                            showToast('Iniciando sessão...', 'success');
+                                            try { await wahaService.startSession(activeSession.name); } catch (e) { /* Ignore benign errors */ }
+                                            refreshSessions();
+                                        }} style={{ padding: '8px', width: '100%', textAlign: 'left', background: 'transparent', border: 'none', fontSize: '13px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', color: '#10B981' }}>
+                                            <Play size={14} /> Iniciar
+                                        </button>
+
+                                        <button onClick={async () => {
+                                            if (!activeSession) return;
+                                            setActiveSession({ ...activeSession, status: 'STARTING' });
+                                            setIsSessionMenuOpen(false);
+                                            showToast('Reiniciando sessão...', 'info');
+                                            try { await wahaService.restartSession(activeSession.name); } catch (e) { }
+                                            refreshSessions();
+                                        }} style={{ padding: '8px', width: '100%', textAlign: 'left', background: 'transparent', border: 'none', fontSize: '13px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', color: '#3B82F6' }}>
+                                            <RefreshCw size={14} /> Reiniciar
+                                        </button>
+
+                                        <button onClick={async () => {
+                                            if (!activeSession) return;
+                                            setActiveSession({ ...activeSession, status: 'STOPPED' });
+                                            setIsSessionMenuOpen(false);
+                                            showToast('Sessão parada.', 'error');
+                                            try { await wahaService.stopSession(activeSession.name); } catch (e) { }
+                                            refreshSessions();
+                                        }} style={{ padding: '8px', width: '100%', textAlign: 'left', background: 'transparent', border: 'none', fontSize: '13px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', color: '#F59E0B' }}>
+                                            <WifiOff size={14} /> Parar
+                                        </button>
+
+                                        <button onClick={async () => {
+                                            if (!activeSession) return;
+                                            if (!window.confirm('Tem certeza que deseja sair desta sessão?')) return;
+                                            setIsSessionMenuOpen(false);
+                                            showToast('Desconectando...', 'error');
+                                            try { await wahaService.logoutSession(activeSession.name); } catch (e) { }
+                                            refreshSessions();
+                                        }} style={{ padding: '8px', width: '100%', textAlign: 'left', background: 'transparent', border: 'none', fontSize: '13px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', color: '#EF4444' }}>
+                                            <LogOut size={14} /> Sair (Logout)
+                                        </button>
+
                                         <div style={{ height: '1px', background: '#F1F5F9', margin: '4px 0' }} />
-                                        <button onClick={() => { wahaService.stopSession(activeSession?.name).then(refreshSessions); setIsSessionMenuOpen(false); }} style={{ padding: '8px', width: '100%', textAlign: 'left', background: 'transparent', border: 'none', fontSize: '13px', cursor: 'pointer', color: '#ef4444', display: 'flex', alignItems: 'center', gap: '8px' }}><WifiOff size={14} /> Parar Sessão</button>
+
+                                        <button onClick={() => { localStorage.setItem('createNewSession', 'true'); window.location.reload(); }} style={{ padding: '8px', width: '100%', textAlign: 'left', background: 'transparent', border: 'none', fontSize: '13px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', color: '#64748B' }}>
+                                            <Plus size={14} /> Nova Sessão
+                                        </button>
                                     </div>
                                 )}
                             </div>
@@ -970,6 +1368,15 @@ const ChatsPage = () => {
                             <div
                                 key={lead.id}
                                 onClick={() => setSelectedLead(lead)}
+                                onContextMenu={(e) => {
+                                    e.preventDefault();
+                                    setContextMenu({
+                                        show: true,
+                                        x: e.clientX, // Use Viewport coordinates for fixed positioning
+                                        y: e.clientY,
+                                        chatId: lead.id
+                                    });
+                                }}
                                 style={{
                                     padding: '16px 20px', // Respiro aumentado
                                     borderBottom: '1px solid #F1F5F9', // Divisor horizontal
@@ -1003,8 +1410,18 @@ const ChatsPage = () => {
                                 </div>
                                 <div style={{ flex: 1, overflow: 'hidden' }}>
                                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
-                                        <div style={{ fontSize: '14px', fontWeight: '600', color: '#1E293B' }}>
+                                        <div style={{ fontSize: '14px', fontWeight: '600', color: '#1E293B', display: 'flex', alignItems: 'center', gap: '6px' }}>
                                             {lead.name || lead.phone || 'Desconhecido'}
+                                            {/* AI ACTIVE BADGE */}
+                                            {['pending', 'contacted', 'responded', 'negotiating', 'qualified'].includes(lead.campaign_status) && (
+                                                <div style={{
+                                                    fontSize: '9px', fontWeight: '700', color: '#7C3AED',
+                                                    background: '#EDE9FE', padding: '1px 5px', borderRadius: '4px',
+                                                    border: '1px solid #DDD6FE', letterSpacing: '0.02em'
+                                                }}>
+                                                    AI
+                                                </div>
+                                            )}
                                         </div>
 
                                         {/* Status Dot */}
@@ -1013,12 +1430,15 @@ const ChatsPage = () => {
                                             height: '8px',
                                             borderRadius: '50%',
                                             background: (presence[normalizeJid(lead.chat_id)] === 'online' || presence[normalizeJid(lead.id)] === 'online') ? '#22c55e' :
-                                                (presence[normalizeJid(lead.chat_id)] === 'typing' || presence[normalizeJid(lead.id)] === 'typing') ? '#3b82f6' : '#E2E8F0',
+                                                (presence[normalizeJid(lead.chat_id)] === 'recording' || presence[normalizeJid(lead.id)] === 'recording') ? '#EF4444' :
+                                                    (presence[normalizeJid(lead.chat_id)] === 'typing' || presence[normalizeJid(lead.id)] === 'typing') ? '#3b82f6' : '#E2E8F0',
                                             transition: 'background 0.3s ease'
-                                        }} title={presence[normalizeJid(lead.chat_id)] || presence[normalizeJid(lead.id)] || 'offline'} />
+                                        }} title={presence[normalizeJid(lead.chat_id)] || presence[normalizeJid(lead.id)] || 'Visto por último'} />
                                     </div>
                                     <div style={{ fontSize: '12px', color: '#64748B', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                        {presence[normalizeJid(lead.chat_id)] === 'typing' || presence[normalizeJid(lead.id)] === 'typing' ? (
+                                        {presence[normalizeJid(lead.chat_id)] === 'recording' || presence[normalizeJid(lead.id)] === 'recording' ? (
+                                            <span style={{ color: '#EF4444', fontWeight: '500' }}>Gravando áudio...</span>
+                                        ) : presence[normalizeJid(lead.chat_id)] === 'typing' || presence[normalizeJid(lead.id)] === 'typing' ? (
                                             <span style={{ color: '#3b82f6', fontWeight: '500' }}>Digitando...</span>
                                         ) : (
                                             lead.last_message || 'Nenhuma mensagem...'
@@ -1036,18 +1456,14 @@ const ChatsPage = () => {
 
 
 
-                {/* Right Column: Floating Island Area */}
-                <div style={{ flex: 1, padding: '0 0 0 20px', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                {/* Right Column: Chat Area */}
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: '#FFFFFF' }}>
                     {selectedLead ? (
                         <div style={{
                             flex: 1,
                             display: 'flex',
                             flexDirection: 'column',
                             background: 'var(--bg-secondary)',
-                            borderRadius: '0',
-                            borderLeft: '1px solid #E2E8F0',
-                            boxShadow: 'none',
-                            overflow: 'hidden',
                             height: '100%'
                         }}>
                             {/* Chat Header - ALIGNMENT TARGET (Height 64px) */}
@@ -1083,15 +1499,25 @@ const ChatsPage = () => {
                                         <div style={{
                                             width: '8px', height: '8px', borderRadius: '50%',
                                             background: (presence[normalizeJid(selectedLead.chat_id)] === 'online' || presence[normalizeJid(selectedLead.id)] === 'online') ? '#22c55e' :
-                                                (presence[normalizeJid(selectedLead.chat_id)] === 'typing' || presence[normalizeJid(selectedLead.id)] === 'typing') ? '#3B82F6' : '#94A3B8',
+                                                (presence[normalizeJid(selectedLead.chat_id)] === 'recording' || presence[normalizeJid(selectedLead.id)] === 'recording') ? '#EF4444' :
+                                                    (presence[normalizeJid(selectedLead.chat_id)] === 'typing' || presence[normalizeJid(selectedLead.id)] === 'typing') ? '#3B82F6' : '#94A3B8',
                                             transition: 'all 0.3s ease'
                                         }} />
-                                        <span style={{
-                                            color: (presence[normalizeJid(selectedLead.chat_id)] === 'typing' || presence[normalizeJid(selectedLead.id)] === 'typing') ? '#3B82F6' : '#94A3B8',
-                                            fontWeight: (presence[normalizeJid(selectedLead.chat_id)] === 'typing' || presence[normalizeJid(selectedLead.id)] === 'typing') ? '600' : '400'
-                                        }}>
-                                            {presence[normalizeJid(selectedLead.chat_id)] === 'typing' || presence[normalizeJid(selectedLead.id)] === 'typing' ? 'Digitando...' :
-                                                (presence[normalizeJid(selectedLead.chat_id)] === 'online' || presence[normalizeJid(selectedLead.id)] === 'online' ? 'Online' : 'Offline')}
+                                        <span
+                                            key={presence[normalizeJid(selectedLead.chat_id)] === 'recording' || presence[normalizeJid(selectedLead.id)] === 'recording' ? 'recording' :
+                                                presence[normalizeJid(selectedLead.chat_id)] === 'typing' || presence[normalizeJid(selectedLead.id)] === 'typing' ? 'typing' :
+                                                    presence[normalizeJid(selectedLead.chat_id)] === 'online' || presence[normalizeJid(selectedLead.id)] === 'online' ? 'online' : 'offline'}
+                                            className="animate-status-change"
+                                            style={{
+                                                display: 'inline-block', // Required for transform animation
+                                                color: (presence[normalizeJid(selectedLead.chat_id)] === 'recording' || presence[normalizeJid(selectedLead.id)] === 'recording') ? '#EF4444' :
+                                                    (presence[normalizeJid(selectedLead.chat_id)] === 'typing' || presence[normalizeJid(selectedLead.id)] === 'typing') ? '#3B82F6' : '#94A3B8',
+                                                fontWeight: (presence[normalizeJid(selectedLead.chat_id)] === 'typing' || presence[normalizeJid(selectedLead.id)] === 'typing' || presence[normalizeJid(selectedLead.chat_id)] === 'recording' || presence[normalizeJid(selectedLead.id)] === 'recording') ? '600' : '400'
+                                            }}>
+                                            {presence[normalizeJid(selectedLead.chat_id)] === 'recording' || presence[normalizeJid(selectedLead.id)] === 'recording' ? 'Gravando áudio...' :
+                                                presence[normalizeJid(selectedLead.chat_id)] === 'typing' || presence[normalizeJid(selectedLead.id)] === 'typing' ? 'Digitando...' :
+                                                    (presence[normalizeJid(selectedLead.chat_id)] === 'online' || presence[normalizeJid(selectedLead.id)] === 'online' ? 'Online' :
+                                                        formatLastSeen(selectedLead.last_seen))}
                                         </span>
                                     </div>
                                 </div>
@@ -1101,7 +1527,6 @@ const ChatsPage = () => {
                                     <button
                                         onClick={() => setShowChatMenu(!showChatMenu)}
                                         style={{
-                                            background: 'transparent',
                                             border: 'none',
                                             cursor: 'pointer',
                                             width: '32px',
@@ -1167,6 +1592,39 @@ const ChatsPage = () => {
                                 </div>
                             </div>
 
+                            {/* Status Banner - Show if NOT working AND NOT starting (User wants it hidden while starting) */}
+                            {sessionStatus !== 'WORKING' && sessionStatus !== 'STARTING' && (
+                                <div style={{
+                                    padding: '8px 16px',
+                                    background: sessionStatus === 'STARTING' ? '#FEF3C7' : '#FEE2E2',
+                                    color: sessionStatus === 'STARTING' ? '#92400E' : '#991B1B',
+                                    fontSize: '13px',
+                                    fontWeight: '500',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    gap: '8px',
+                                    borderBottom: '1px solid rgba(0,0,0,0.05)'
+                                }}>
+                                    {sessionStatus === 'STARTING' ? (
+                                        <>
+                                            <Loader size={14} className="animate-spin" />
+                                            Aguarde... Conectando ao WhatsApp
+                                        </>
+                                    ) : sessionStatus === 'SCAN_QR_CODE' ? (
+                                        <>
+                                            <Camera size={14} />
+                                            Sessão desconectada. Escaneie o QR Code.
+                                        </>
+                                    ) : (
+                                        <>
+                                            <AlertTriangle size={14} />
+                                            Sessão desconectada ou falha. Verifique a conexão.
+                                        </>
+                                    )}
+                                </div>
+                            )}
+
                             {/* Messages Area */}
                             <div style={{ flex: 1, padding: '24px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px' }}>
                                 {
@@ -1206,7 +1664,9 @@ const ChatsPage = () => {
                                                         maxWidth: '65%',
                                                         padding: '12px 18px',
                                                         borderRadius: '18px',
-                                                        background: msg.from_me ? 'linear-gradient(135deg, #60A5FA 0%, #3B82F6 100%)' : '#FFFFFF',
+                                                        background: msg.from_me
+                                                            ? (msg.author === 'ai' ? 'linear-gradient(135deg, #7C3AED 0%, #6D28D9 100%)' : 'linear-gradient(135deg, #60A5FA 0%, #3B82F6 100%)')
+                                                            : '#FFFFFF',
                                                         color: msg.from_me ? '#ffffff' : '#1E293B',
                                                         fontSize: '14.5px',
                                                         lineHeight: '22px',
@@ -1217,6 +1677,24 @@ const ChatsPage = () => {
                                                         marginBottom: '4px',
                                                         border: !msg.from_me ? '1px solid #F1F5F9' : 'none'
                                                     }}>
+                                                        {/* AI Attribution Label */}
+                                                        {msg.from_me && msg.author === 'ai' && (
+                                                            <div style={{
+                                                                position: 'absolute',
+                                                                top: '-8px',
+                                                                right: '10px',
+                                                                background: '#EDE9FE',
+                                                                color: '#6D28D9',
+                                                                fontSize: '9px',
+                                                                fontWeight: '700',
+                                                                padding: '2px 6px',
+                                                                borderRadius: '4px',
+                                                                boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
+                                                                border: '1px solid #DDD6FE'
+                                                            }}>
+                                                                AI
+                                                            </div>
+                                                        )}
                                                         {/* Media Handling */}
                                                         {(msg.type === 'image' && (msg.media_url || msg.mediaUrl)) && (
                                                             <img
@@ -1269,7 +1747,14 @@ const ChatsPage = () => {
                                         });
                                     })() : (
                                         <div style={{ textAlign: 'center', color: '#94A3B8', marginTop: '40px' }}>
-                                            <p style={{ fontSize: '13px' }}>Início da conversa</p>
+                                            {isLoadingMessages ? (
+                                                <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px' }}>
+                                                    <Loader className="animate-spin" size={20} />
+                                                    <p style={{ fontSize: '13px', margin: 0 }}>Carregando mensagens...</p>
+                                                </div>
+                                            ) : (
+                                                <p style={{ fontSize: '13px' }}>Início da conversa</p>
+                                            )}
                                         </div>
                                     )
                                 }
@@ -1298,186 +1783,275 @@ const ChatsPage = () => {
                                                 </div>
                                             );
                                         }
+                                        if (status === 'recording') {
+                                            return (
+                                                <div className="animate-slide-in" style={{
+                                                    alignSelf: 'flex-start',
+                                                    padding: '12px',
+                                                    borderRadius: '50%',
+                                                    background: 'var(--bg-tertiary)',
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center',
+                                                    width: 'fit-content',
+                                                    marginLeft: '10px'
+                                                }}>
+                                                    <div style={{
+                                                        display: 'flex',
+                                                        alignItems: 'center',
+                                                        justifyContent: 'center',
+                                                        color: '#EF4444'
+                                                    }} className="animate-gentle-bounce">
+                                                        <Mic size={20} fill="currentColor" />
+                                                    </div>
+                                                </div>
+                                            );
+                                        }
                                         return null;
                                     })()
                                 }
                                 <div ref={messagesEndRef} />
                             </div >
 
-                            {/* Input Area */}
+                            {/* Input Area or AI Managed Banner */}
                             <div style={{ padding: '0 20px', background: 'transparent', display: 'flex', justifyContent: 'center', position: 'relative', zIndex: 40 }}>
-                                <div style={{
-                                    display: 'flex',
-                                    justifyContent: 'center', // Center horizontally
-                                    width: '100%',
-                                    maxWidth: '800px',
-                                    margin: '0 auto 24px auto', // Float 24px from bottom
-                                    position: 'relative'
-                                }}>
-                                    {/* Attachment Menu - Relocated & Styled */}
-                                    {isAttachMenuOpen && (
-                                        <div style={{
-                                            position: 'absolute',
-                                            bottom: '60px', // Floating above pill
-                                            left: '0', // Aligned with pill start
-                                            background: '#FFFFFF',
-                                            borderRadius: '16px',
-                                            padding: '8px',
-                                            display: 'flex',
-                                            flexDirection: 'column',
-                                            gap: '4px',
-                                            boxShadow: '0 10px 40px rgba(0,0,0,0.1)', // Richer shadow
-                                            zIndex: 60,
-                                            minWidth: '220px',
-                                            border: '1px solid #E2E8F0',
-                                            animation: 'fadeIn 0.2s ease-out'
-                                        }}>
-                                            {[
-                                                { label: 'Documento', icon: FileText, color: '#6366f1', accept: '*', action: 'file' },
-                                                { label: 'Fotos e vídeos', icon: ImageIcon, color: '#3b82f6', accept: 'image/*,video/*', action: 'media' },
-                                                { label: 'Câmera', icon: Camera, color: '#ec4899', action: 'camera' },
-                                            ].map((item, idx) => (
+                                {isAIActive ? (
+                                    <div style={{
+                                        width: '100%',
+                                        maxWidth: '800px',
+                                        margin: '0 auto 24px auto',
+                                        background: '#F8FAFC',
+                                        border: '1px solid #E2E8F0',
+                                        borderRadius: '16px',
+                                        padding: '12px 24px',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'space-between',
+                                        boxShadow: '0 2px 10px rgba(0,0,0,0.03)'
+                                    }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                            <div style={{
+                                                width: '32px', height: '32px', borderRadius: '50%',
+                                                background: '#EDE9FE', display: 'flex', alignItems: 'center',
+                                                justifyContent: 'center', color: '#7C3AED'
+                                            }}>
+                                                <Sparkles size={16} fill="currentColor" />
+                                            </div>
+                                            <div>
+                                                <div style={{ fontSize: '14px', fontWeight: '600', color: '#1E293B' }}>
+                                                    IA Ativa
+                                                </div>
+                                                <div style={{ fontSize: '12px', color: '#64748B' }}>
+                                                    A assistente está conduzindo esta conversa.
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <button
+                                            onClick={handleTakeControl}
+                                            style={{
+                                                padding: '8px 16px',
+                                                background: '#FFFFFF',
+                                                border: '1px solid #E2E8F0',
+                                                borderRadius: '8px',
+                                                color: '#1E293B',
+                                                fontSize: '13px',
+                                                fontWeight: '500',
+                                                cursor: 'pointer',
+                                                transition: 'all 0.2s',
+                                                boxShadow: '0 1px 2px rgba(0,0,0,0.05)'
+                                            }}
+                                            onMouseEnter={(e) => {
+                                                e.currentTarget.style.background = '#F1F5F9';
+                                                e.currentTarget.style.borderColor = '#CBD5E1';
+                                            }}
+                                            onMouseLeave={(e) => {
+                                                e.currentTarget.style.background = '#FFFFFF';
+                                                e.currentTarget.style.borderColor = '#E2E8F0';
+                                            }}
+                                        >
+                                            Assumir Controle
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <div style={{
+                                        display: 'flex',
+                                        justifyContent: 'center', // Center horizontally
+                                        width: '100%',
+                                        maxWidth: '800px',
+                                        margin: '0 auto 24px auto', // Float 24px from bottom
+                                        position: 'relative'
+                                    }}>
+                                        {/* Attachment Menu - Relocated & Styled */}
+                                        {isAttachMenuOpen && (
+                                            <div style={{
+                                                position: 'absolute',
+                                                bottom: '60px', // Floating above pill
+                                                left: '0', // Aligned with pill start
+                                                background: '#FFFFFF',
+                                                borderRadius: '16px',
+                                                padding: '8px',
+                                                display: 'flex',
+                                                flexDirection: 'column',
+                                                gap: '4px',
+                                                boxShadow: '0 10px 40px rgba(0,0,0,0.1)', // Richer shadow
+                                                zIndex: 60,
+                                                minWidth: '220px',
+                                                border: '1px solid #E2E8F0',
+                                                animation: 'fadeIn 0.2s ease-out'
+                                            }}>
+                                                {[
+                                                    { label: 'Documento', icon: FileText, color: '#6366f1', accept: '*', action: 'file' },
+                                                    { label: 'Fotos e vídeos', icon: ImageIcon, color: '#3b82f6', accept: 'image/*,video/*', action: 'media' },
+                                                    { label: 'Câmera', icon: Camera, color: '#ec4899', action: 'camera' },
+                                                ].map((item, idx) => (
+                                                    <div
+                                                        key={idx}
+                                                        onClick={() => {
+                                                            if (fileInputRef.current) {
+                                                                fileInputRef.current.accept = item.accept || '*';
+                                                                fileInputRef.current.click();
+                                                            }
+                                                            setIsAttachMenuOpen(false);
+                                                        }}
+                                                        style={{
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            gap: '12px',
+                                                            padding: '12px 16px',
+                                                            cursor: 'pointer',
+                                                            borderRadius: '12px',
+                                                            transition: 'background 0.2s',
+                                                            color: '#334155'
+                                                        }}
+                                                        onMouseEnter={(e) => e.currentTarget.style.background = '#F1F5F9'}
+                                                        onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                                                    >
+                                                        <item.icon size={20} color={item.color} />
+                                                        <span style={{ fontSize: '14px', fontWeight: 500 }}>{item.label}</span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                        <input
+                                            type="file"
+                                            ref={fileInputRef}
+                                            style={{ display: 'none' }}
+                                            onChange={handleFileUpload}
+                                        />
+
+                                        {/* Recording / Input */}
+                                        {isRecording ? (
+                                            <div style={{
+                                                flex: 1,
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: '16px',
+                                                background: '#FFFFFF',
+                                                borderRadius: '9999px',
+                                                padding: '8px 16px',
+                                                boxShadow: '0 2px 15px rgba(0, 0, 0, 0.03)',
+                                                border: '1px solid #E2E8F0',
+                                                color: '#ef4444'
+                                            }}>
+                                                <div className="animate-pulse" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                    <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: 'currentColor' }} />
+                                                    <span style={{ fontWeight: 600 }}>{formatTime(recordingTime)}</span>
+                                                </div>
+                                                <span style={{ flex: 1, color: 'var(--text-primary)', fontSize: '14px' }}>Gravando áudio...</span>
+
+                                                <div onClick={handleCancelRecording} style={{ cursor: 'pointer', color: '#ef4444', padding: '4px' }}>
+                                                    <X size={20} />
+                                                </div>
+                                                <div onClick={() => handleStopRecording(true)} style={{ cursor: 'pointer', color: '#22c55e', padding: '4px' }}>
+                                                    <Check size={20} />
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div style={{
+                                                flex: 1,
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: '12px',
+                                                background: '#FFFFFF', // Pure White
+                                                borderRadius: '9999px', // Perfect Pill
+                                                padding: '8px 16px', // Balanced Padding
+                                                boxShadow: '0 2px 15px rgba(0, 0, 0, 0.03)', // Subtle Shadow
+                                                border: '1px solid #E2E8F0', // Fine Border
+                                                transition: 'box-shadow 0.2s',
+                                                position: 'relative'
+                                            }}
+                                                className="hover:shadow-sm focus-within:shadow-sm"
+                                            >
+                                                {/* Integrated Plus Button (The Only One) */}
                                                 <div
-                                                    key={idx}
-                                                    onClick={() => {
-                                                        if (fileInputRef.current) {
-                                                            fileInputRef.current.accept = item.accept || '*';
-                                                            fileInputRef.current.click();
-                                                        }
-                                                        setIsAttachMenuOpen(false);
-                                                    }}
+                                                    onClick={() => setIsAttachMenuOpen(!isAttachMenuOpen)}
                                                     style={{
+                                                        cursor: 'pointer',
+                                                        color: isAttachMenuOpen ? 'var(--primary)' : '#64748B',
+                                                        transition: 'transform 0.2s',
+                                                        transform: isAttachMenuOpen ? 'rotate(45deg)' : 'none',
                                                         display: 'flex',
                                                         alignItems: 'center',
-                                                        gap: '12px',
-                                                        padding: '12px 16px',
-                                                        cursor: 'pointer',
-                                                        borderRadius: '12px',
-                                                        transition: 'background 0.2s',
-                                                        color: '#334155'
+                                                        padding: '4px'
                                                     }}
-                                                    onMouseEnter={(e) => e.currentTarget.style.background = '#F1F5F9'}
-                                                    onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
                                                 >
-                                                    <item.icon size={20} color={item.color} />
-                                                    <span style={{ fontSize: '14px', fontWeight: 500 }}>{item.label}</span>
+                                                    <Plus size={20} />
                                                 </div>
-                                            ))}
-                                        </div>
-                                    )}
-                                    <input
-                                        type="file"
-                                        ref={fileInputRef}
-                                        style={{ display: 'none' }}
-                                        onChange={handleFileUpload}
-                                    />
 
-                                    {/* Recording / Input */}
-                                    {isRecording ? (
-                                        <div style={{
-                                            flex: 1,
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '16px',
-                                            background: '#FFFFFF',
-                                            borderRadius: '9999px',
-                                            padding: '8px 16px',
-                                            boxShadow: '0 2px 15px rgba(0, 0, 0, 0.03)',
-                                            border: '1px solid #E2E8F0',
-                                            color: '#ef4444'
-                                        }}>
-                                            <div className="animate-pulse" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: 'currentColor' }} />
-                                                <span style={{ fontWeight: 600 }}>{formatTime(recordingTime)}</span>
-                                            </div>
-                                            <span style={{ flex: 1, color: 'var(--text-primary)', fontSize: '14px' }}>Gravando áudio...</span>
+                                                <div style={{ cursor: 'pointer', color: '#64748B', display: 'flex', alignItems: 'center', padding: '4px' }}>
+                                                    <Smile size={20} />
+                                                </div>
 
-                                            <div onClick={handleCancelRecording} style={{ cursor: 'pointer', color: '#ef4444', padding: '4px' }}>
-                                                <X size={20} />
-                                            </div>
-                                            <div onClick={() => handleStopRecording(true)} style={{ cursor: 'pointer', color: '#22c55e', padding: '4px' }}>
-                                                <Check size={20} />
-                                            </div>
-                                        </div>
-                                    ) : (
-                                        <div style={{
-                                            flex: 1,
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            gap: '12px',
-                                            background: '#FFFFFF', // Pure White
-                                            borderRadius: '9999px', // Perfect Pill
-                                            padding: '8px 16px', // Balanced Padding
-                                            boxShadow: '0 2px 15px rgba(0, 0, 0, 0.03)', // Subtle Shadow
-                                            border: '1px solid #E2E8F0', // Fine Border
-                                            transition: 'box-shadow 0.2s',
-                                            position: 'relative'
-                                        }}
-                                            className="hover:shadow-sm focus-within:shadow-sm"
-                                        >
-                                            {/* Integrated Plus Button (The Only One) */}
-                                            <div
-                                                onClick={() => setIsAttachMenuOpen(!isAttachMenuOpen)}
-                                                style={{
-                                                    cursor: 'pointer',
-                                                    color: isAttachMenuOpen ? 'var(--primary)' : '#64748B',
-                                                    transition: 'transform 0.2s',
-                                                    transform: isAttachMenuOpen ? 'rotate(45deg)' : 'none',
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    padding: '4px'
-                                                }}
-                                            >
-                                                <Plus size={20} />
-                                            </div>
+                                                <input
+                                                    type="text"
+                                                    placeholder={sessionStatus === 'WORKING' || sessionStatus === 'STARTING' ? "Digite uma mensagem..." : "Conectando ao WhatsApp..."}
+                                                    value={inputValue}
+                                                    onChange={(e) => setInputValue(e.target.value)}
+                                                    onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+                                                    disabled={sessionStatus !== 'WORKING' && sessionStatus !== 'STARTING'}
+                                                    style={{
+                                                        flex: 1,
+                                                        background: 'transparent',
+                                                        border: 'none',
+                                                        color: '#1E293B',
+                                                        outline: 'none',
+                                                        fontSize: '14px',
+                                                        padding: '0 8px',
+                                                        fontWeight: 400,
+                                                        opacity: (sessionStatus === 'WORKING' || sessionStatus === 'STARTING') ? 1 : 0.6,
+                                                        cursor: (sessionStatus === 'WORKING' || sessionStatus === 'STARTING') ? 'text' : 'not-allowed'
+                                                    }}
+                                                />
 
-                                            <div style={{ cursor: 'pointer', color: '#64748B', display: 'flex', alignItems: 'center', padding: '4px' }}>
-                                                <Smile size={20} />
+                                                {/* Mic / Send Inside Capsule */}
+                                                <div
+                                                    onClick={() => {
+                                                        if (sessionStatus !== 'WORKING' && sessionStatus !== 'STARTING') return;
+                                                        inputValue.trim() ? handleSendMessage() : handleStartRecording();
+                                                    }}
+                                                    style={{
+                                                        width: '36px',
+                                                        height: '36px',
+                                                        display: 'flex',
+                                                        alignItems: 'center',
+                                                        justifyContent: 'center',
+                                                        cursor: (sessionStatus === 'WORKING' || sessionStatus === 'STARTING') ? 'pointer' : 'not-allowed',
+                                                        color: inputValue.trim() ? '#ffffff' : '#64748B',
+                                                        background: (sessionStatus !== 'WORKING' && sessionStatus !== 'STARTING') ? '#E2E8F0' : (inputValue.trim() ? 'var(--primary)' : 'transparent'),
+                                                        borderRadius: '50%',
+                                                        transition: 'all 0.2s',
+                                                    }}
+                                                >
+                                                    {inputValue.trim() ? (
+                                                        <Play size={16} fill="currentColor" style={{ marginLeft: '2px' }} />
+                                                    ) : (
+                                                        <Mic size={20} />
+                                                    )}
+                                                </div>
                                             </div>
-
-                                            <input
-                                                type="text"
-                                                placeholder="Digite uma mensagem..."
-                                                value={inputValue}
-                                                onChange={(e) => setInputValue(e.target.value)}
-                                                onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
-                                                style={{
-                                                    flex: 1,
-                                                    background: 'transparent',
-                                                    border: 'none',
-                                                    color: '#1E293B',
-                                                    outline: 'none',
-                                                    fontSize: '14px',
-                                                    padding: '0 8px',
-                                                    fontWeight: 400
-                                                }}
-                                            />
-
-                                            {/* Mic / Send Inside Capsule */}
-                                            <div
-                                                onClick={inputValue.trim() ? handleSendMessage : handleStartRecording}
-                                                style={{
-                                                    width: '36px',
-                                                    height: '36px',
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    justifyContent: 'center',
-                                                    cursor: 'pointer',
-                                                    color: inputValue.trim() ? '#ffffff' : '#64748B',
-                                                    background: inputValue.trim() ? 'var(--primary)' : 'transparent',
-                                                    borderRadius: '50%',
-                                                    transition: 'all 0.2s',
-                                                }}
-                                            >
-                                                {inputValue.trim() ? (
-                                                    <Play size={16} fill="currentColor" style={{ marginLeft: '2px' }} />
-                                                ) : (
-                                                    <Mic size={20} />
-                                                )}
-                                            </div>
-                                        </div>
-                                    )}
-                                </div>
+                                        )}
+                                    </div>
+                                )}
                             </div >
                         </div >
                     ) : (
@@ -1486,9 +2060,8 @@ const ChatsPage = () => {
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'center',
-                            background: 'var(--bg-secondary)',
-                            borderRadius: 'var(--radius-md)',
-                            boxShadow: 'var(--shadow-card)',
+                            background: '#FFFFFF',
+                            borderLeft: '1px solid #E2E8F0',
                             flexDirection: 'column',
                             gap: '16px'
                         }}>
@@ -1496,22 +2069,68 @@ const ChatsPage = () => {
                                 width: '80px',
                                 height: '80px',
                                 borderRadius: '24px',
-                                background: 'var(--bg-tertiary)',
+                                background: '#F1F5F9',
                                 display: 'flex',
                                 alignItems: 'center',
                                 justifyContent: 'center',
-                                color: 'var(--text-secondary)'
+                                color: '#94A3B8'
                             }}>
                                 <MessageSquare size={32} />
                             </div>
 
                             <div style={{ textAlign: 'center' }}>
-                                <h3 style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '8px' }}>Nenhuma conversa selecionada</h3>
-                                <p style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>Selecione um contato para começar a conversar</p>
+                                <h3 style={{ fontSize: '18px', fontWeight: 600, color: '#1E293B', marginBottom: '8px' }}>Nenhuma conversa selecionada</h3>
+                                <p style={{ fontSize: '14px', color: '#64748B' }}>Selecione um contato para começar a conversar</p>
                             </div>
                         </div>
                     )}
                 </div >
+
+                {/* Context Menu / Delete Chat - Fixed Position */}
+                {contextMenu.show && (
+                    <div style={{
+                        position: 'fixed',
+                        top: contextMenu.y,
+                        left: contextMenu.x,
+                        background: '#FFF',
+                        borderRadius: '8px',
+                        boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                        padding: '4px',
+                        zIndex: 99999,
+                        width: '180px',
+                        border: '1px solid #E2E8F0'
+                    }}>
+                        <button
+                            onClick={handleDeleteChat}
+                            style={{
+                                width: '100%',
+                                padding: '10px 12px',
+                                background: 'transparent',
+                                border: 'none',
+                                color: '#EF4444',
+                                fontSize: '13px',
+                                fontWeight: '500',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '8px',
+                                cursor: 'pointer',
+                                borderRadius: '6px'
+                            }}
+                            onMouseEnter={(e) => e.target.style.background = '#FEF2F2'}
+                            onMouseLeave={(e) => e.target.style.background = 'transparent'}
+                        >
+                            <Trash2 size={14} /> Apagar conversa
+                        </button>
+                        <div style={{ padding: '8px 12px', fontSize: '11px', color: '#94A3B8' }}>
+                            Apaga mensagens do banco
+                        </div>
+                    </div>
+                )
+                }
+                {/* Toast Notification */}
+                <div style={{ position: 'fixed', top: '24px', right: '24px', zIndex: 99999 }}>
+                    {toast.show && <Toast message={toast.message} type={toast.type} onClose={() => setToast({ ...toast, show: false })} />}
+                </div>
             </div >
         );
     }
@@ -1701,6 +2320,46 @@ const ChatsPage = () => {
                     </>
                 )}
             </div>
+            {/* Context Menu / Delete Chat - Fixed Position */}
+            {contextMenu.show && (
+                <div style={{
+                    position: 'fixed',
+                    top: contextMenu.y,
+                    left: contextMenu.x,
+                    background: '#FFF',
+                    borderRadius: '8px',
+                    boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                    padding: '4px',
+                    zIndex: 99999,
+                    width: '180px',
+                    border: '1px solid #E2E8F0'
+                }}>
+                    <button
+                        onClick={handleDeleteChat}
+                        style={{
+                            width: '100%',
+                            padding: '10px 12px',
+                            background: 'transparent',
+                            border: 'none',
+                            color: '#EF4444',
+                            fontSize: '13px',
+                            fontWeight: '500',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            cursor: 'pointer',
+                            borderRadius: '6px'
+                        }}
+                        onMouseEnter={(e) => e.target.style.background = '#FEF2F2'}
+                        onMouseLeave={(e) => e.target.style.background = 'transparent'}
+                    >
+                        <Trash2 size={14} /> Apagar conversa
+                    </button>
+                    <div style={{ padding: '8px 12px', fontSize: '11px', color: '#94A3B8' }}>
+                        Apaga mensagens do banco
+                    </div>
+                </div>
+            )}
         </div>
     );
 };
